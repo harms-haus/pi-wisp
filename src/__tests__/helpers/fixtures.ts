@@ -6,9 +6,6 @@
 //
 //   linearGraph()       A → B → C
 //   diamondGraph()      A → {B, C} → D
-//   fanOutGraph()       producer → fanOut (children expand lazily at runtime)
-//   condGraph()         gate → cond(then=approve, else=reject)
-//   loopGraph()         setup → loop(body=worker, until=…)
 //   failThenSkipGraph() A → B(fails) → C(skipped); D independent (succeeds)
 //
 // Each builder returns `{ ir, runState }` with every node starting `pending`
@@ -147,82 +144,6 @@ export function diamondGraph(): GraphFixture {
       { from: "a", to: "c", kind: "dep" },
       { from: "b", to: "d", kind: "dep" },
       { from: "c", to: "d", kind: "dep" },
-    ],
-  );
-  return { ir, runState: makeRunState(ir) };
-}
-
-/**
- * FanOut: a producer node feeds a `fanOut` node whose `iterate`/`each` fns expand
- * it into per-item children at runtime (children are NOT in the IR — they are
- * added lazily when the executor runs the fanOut node).
- */
-export function fanOutGraph(): GraphFixture {
-  const ir = makeGraphIR(
-    [
-      node("producer", "Find the items to fix"),
-      {
-        id: "expand",
-        kind: "fanOut",
-        from: "producer",
-        iterateFnRef: fn('(ctx) => ctx.output("producer").items', "iterate"),
-        eachFnRef: fn('(item) => ({ prompt: "Fix: " + String(item) })', "each"),
-      },
-    ],
-    [{ from: "producer", to: "expand", kind: "fanOut" }],
-  );
-  return { ir, runState: makeRunState(ir) };
-}
-
-/**
- * Conditional: a gate node feeds a `cond` node that routes to either the `then`
- * or `else` branch (the untaken branch is skipped). `when` returns a boolean.
- */
-export function condGraph(): GraphFixture {
-  const ir = makeGraphIR(
-    [
-      node("gate", "Review the completed work"),
-      {
-        id: "decide",
-        kind: "cond",
-        on: "gate",
-        whenFnRef: fn('(ctx) => Boolean(ctx.output("gate").accepted)', "cond"),
-        then: "approve",
-        else: "reject",
-      },
-      node("approve", "Approve and finalize"),
-      node("reject", "Report issues and reject"),
-    ],
-    [
-      { from: "gate", to: "decide", kind: "dep" },
-      { from: "decide", to: "approve", kind: "cond:branch" },
-      { from: "decide", to: "reject", kind: "cond:branch" },
-    ],
-  );
-  return { ir, runState: makeRunState(ir) };
-}
-
-/**
- * Loop: a setup node feeds a `loop` node whose body (`worker`) repeats until
- * `until` returns true (capped at `maxIterations`). The worker reuses its
- * session via transcript-replay across iterations (D4).
- */
-export function loopGraph(): GraphFixture {
-  const ir = makeGraphIR(
-    [
-      node("setup", "Set up the iteration task"),
-      {
-        id: "iterate",
-        kind: "loop",
-        body: "worker",
-        untilFnRef: fn('(ctx) => Boolean(ctx.output("worker").done)', "until"),
-        maxIterations: 3,
-      },
-      node("worker", "Perform one iteration of work"),
-    ],
-    [
-      { from: "setup", to: "iterate", kind: "dep" },
-      { from: "iterate", to: "worker", kind: "loop" },
     ],
   );
   return { ir, runState: makeRunState(ir) };
