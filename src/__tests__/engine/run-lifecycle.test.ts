@@ -113,6 +113,20 @@ vi.mock("../../run/sessions.js");
 vi.mock("../../engine/scheduler.js");
 vi.mock("../../engine/executor.js");
 
+// `node:fs` is mocked ONLY so the setupRunEnv cleanup test can force `rmSync`
+// to throw. Every other fs function delegates to the real implementation so
+// the rest of the suite's on-disk assertions keep working unchanged.
+vi.mock("node:fs", async () => {
+  const actual = await vi.importActual<Record<string, unknown>>("node:fs");
+  const realRmSync = actual.rmSync as typeof rmSync;
+  return {
+    ...actual,
+    rmSync: vi.fn((...args: Parameters<typeof rmSync>) => {
+      realRmSync(...args);
+    }),
+  };
+});
+
 // ── Module under test ───────────────────────────────────────────────
 
 import { runWorkflow } from "../../engine/run.js";
@@ -800,5 +814,175 @@ describe("runWorkflow — run lifecycle orchestration", () => {
       const failure = result as RunFailure;
       expect(failure.error.kind).toBe("runtime");
     });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RED: best-effort catch blocks must emit a `[wisp]` diagnostic to
+// console.error (silent-failure observability).
+//
+// The orchestrator deliberately swallows audit / I/O failures so they never
+// escape, but each `/* Best-effort */` catch is EXPECTED to log a
+// `console.error("[wisp] ...", err)` so silent failures become diagnosable.
+// Today those catches are empty, so every test below is RED. Once the green
+// team adds the logging, they go GREEN without modification.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("runWorkflow — best-effort catches emit [wisp] diagnostics (observability)", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    // Silence + capture console.error so tests can assert on the diagnostic.
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  // ── mid-run finalization guard: audit.runFail catch ──────────────
+  it("logs '[wisp] audit.runFail failed:' when audit.runFail throws during mid-run finalization", async () => {
+    const runsDir = join(tmpDir, "runs");
+    const runDir = join(runsDir, "20260708-0000-boom");
+    const ir = makeLinearGraphIR();
+
+    vi.mocked(compileWorkflow).mockResolvedValueOnce({ ir });
+    vi.mocked(createRunDir).mockReturnValueOnce(runDir);
+    // executeDAG rejects so we enter the mid-run finalization guard.
+    vi.mocked(executeDAG).mockRejectedValueOnce(new Error("dag exploded"));
+    // The best-effort audit.runFail inside that guard throws.
+    vi.mocked(AuditLogger.prototype.runFail).mockImplementationOnce(() => {
+      throw new Error("runFail exploded");
+    });
+
+    const options = makeOptions({
+      runsDir,
+      scriptSource: "export default wf('test')",
+      pi: { appendEntry: vi.fn() },
+    });
+
+    // The thrown audit failure must NOT escape the orchestrator.
+    const result = await withTimeout(callRunWorkflow(options));
+    expect(result.ok).toBe(false);
+
+    // The swallowed failure is at least observable via a [wisp] diagnostic.
+    expect(errorSpy).toHaveBeenCalledWith("[wisp] audit.runFail failed:", expect.any(Error));
+    // Strengthen: the logged error is the one that was actually thrown, not
+    // some unrelated object — so the diagnostic carries real signal.
+    const logged = errorSpy.mock.calls.find(
+      (c: unknown[]) => c[0] === "[wisp] audit.runFail failed:",
+    );
+    expect(logged).toBeDefined();
+    expect((logged![1] as Error).message).toBe("runFail exploded");
+  });
+
+  // ── mid-run finalization guard: writeRunJson catch ───────────────
+  it("logs '[wisp] writeRunJson failed:' when writeRunJson throws during mid-run finalization", async () => {
+    const runsDir = join(tmpDir, "runs");
+    const runDir = join(runsDir, "20260708-0000-boom");
+    const ir = makeLinearGraphIR();
+
+    vi.mocked(compileWorkflow).mockResolvedValueOnce({ ir });
+    vi.mocked(createRunDir).mockReturnValueOnce(runDir);
+    // executeDAG rejects so we enter the mid-run finalization guard.
+    vi.mocked(executeDAG).mockRejectedValueOnce(new Error("dag exploded"));
+    // The best-effort writeRunJson inside that guard throws.
+    vi.mocked(writeRunJson).mockImplementationOnce(() => {
+      throw new Error("writeRunJson exploded");
+    });
+
+    const options = makeOptions({
+      runsDir,
+      scriptSource: "export default wf('test')",
+      pi: { appendEntry: vi.fn() },
+    });
+
+    // The thrown write must NOT escape the orchestrator.
+    const result = await withTimeout(callRunWorkflow(options));
+    expect(result.ok).toBe(false);
+
+    expect(errorSpy).toHaveBeenCalledWith("[wisp] writeRunJson failed:", expect.any(Error));
+    const logged = errorSpy.mock.calls.find(
+      (c: unknown[]) => c[0] === "[wisp] writeRunJson failed:",
+    );
+    expect(logged).toBeDefined();
+    expect((logged![1] as Error).message).toBe("writeRunJson exploded");
+  });
+
+  // ── setupRunEnv cleanup: rmSync catch ────────────────────────────
+  it("logs '[wisp] run directory cleanup failed:' when rmSync throws during setup cleanup", async () => {
+    const runsDir = join(tmpDir, "runs");
+    const runDir = join(runsDir, "20260708-0000-boom");
+    const ir = makeLinearGraphIR();
+
+    vi.mocked(compileWorkflow).mockResolvedValueOnce({ ir });
+    vi.mocked(createRunDir).mockReturnValueOnce(runDir);
+    // Force setupRunEnv to throw AFTER the runDir is created (so the cleanup
+    // branch runs): make audit.runStart throw.
+    vi.mocked(AuditLogger.prototype.runStart).mockImplementationOnce(() => {
+      throw new Error("runStart exploded");
+    });
+    // Force the best-effort cleanup rmSync to throw.
+    vi.mocked(rmSync).mockImplementationOnce(() => {
+      throw new Error("rmSync exploded");
+    });
+
+    const options = makeOptions({
+      runsDir,
+      scriptSource: "export default wf('test')",
+      pi: { appendEntry: vi.fn() },
+    });
+
+    // The setup failure (and the cleanup failure) must NOT escape.
+    const result = await withTimeout(callRunWorkflow(options));
+    expect(result.ok).toBe(false);
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      "[wisp] run directory cleanup failed:",
+      expect.any(Error),
+    );
+    const logged = errorSpy.mock.calls.find(
+      (c: unknown[]) => c[0] === "[wisp] run directory cleanup failed:",
+    );
+    expect(logged).toBeDefined();
+    expect((logged![1] as Error).message).toBe("rmSync exploded");
+  });
+
+  // ── finalize section: outer-catch audit.runFail catch ────────────
+  it("logs '[wisp] audit.runFail failed:' when audit.runFail throws in the finalize catch", async () => {
+    const runsDir = join(tmpDir, "runs");
+    const runDir = join(runsDir, "20260708-0000-boom");
+    const ir = makeLinearGraphIR();
+
+    vi.mocked(compileWorkflow).mockResolvedValueOnce({ ir });
+    vi.mocked(createRunDir).mockReturnValueOnce(runDir);
+    // Execution completes with an all-completed summary → the finalize block
+    // takes the runComplete() branch.
+    vi.mocked(executeDAG).mockResolvedValueOnce(makeSuccessSummary());
+    // runComplete throws, routing us into the finalize outer catch.
+    vi.mocked(AuditLogger.prototype.runComplete).mockImplementationOnce(() => {
+      throw new Error("runComplete exploded");
+    });
+    // The best-effort audit.runFail inside that finalize catch ALSO throws.
+    vi.mocked(AuditLogger.prototype.runFail).mockImplementationOnce(() => {
+      throw new Error("runFail exploded");
+    });
+
+    const options = makeOptions({
+      runsDir,
+      scriptSource: "export default wf('test')",
+      pi: { appendEntry: vi.fn() },
+    });
+
+    // The thrown cleanup error must NOT escape the orchestrator.
+    const result = await withTimeout(callRunWorkflow(options));
+    expect(result.ok).toBe(false);
+
+    expect(errorSpy).toHaveBeenCalledWith("[wisp] audit.runFail failed:", expect.any(Error));
+    const logged = errorSpy.mock.calls.find(
+      (c: unknown[]) => c[0] === "[wisp] audit.runFail failed:",
+    );
+    expect(logged).toBeDefined();
+    expect((logged![1] as Error).message).toBe("runFail exploded");
   });
 });

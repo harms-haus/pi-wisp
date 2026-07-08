@@ -316,8 +316,9 @@ function setupRunEnv(
     if (runDir !== undefined && !isExistingRunDir) {
       try {
         rmSync(runDir, { recursive: true, force: true });
-      } catch {
-        // Best-effort — cleanup must not throw.
+      } catch (cleanupErr) {
+        // Best-effort — cleanup must not throw, but log so failures are observable.
+        console.error("[wisp] run directory cleanup failed:", cleanupErr);
       }
     }
     return {
@@ -391,13 +392,15 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunWorkf
     // not skip the next.
     try {
       audit.runFail(err instanceof Error ? err.message : String(err));
-    } catch {
-      // Best-effort — audit must not throw.
+    } catch (err2) {
+      // Best-effort — audit must not throw, but log so failures are observable.
+      console.error("[wisp] audit.runFail failed:", err2);
     }
     try {
       writeRunJson(runDir, runState);
-    } catch {
-      // Best-effort — writeRunJson must not throw.
+    } catch (err2) {
+      // Best-effort — writeRunJson must not throw, but log so failures are observable.
+      console.error("[wisp] writeRunJson failed:", err2);
     }
     persistRun(options.pi, runState);
     return buildMidRunFailure(err, runDir);
@@ -425,8 +428,9 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunWorkf
     // structured RunFailure so the throw NEVER escapes the orchestrator.
     try {
       audit.runFail(err instanceof Error ? err.message : String(err));
-    } catch {
-      // Best-effort — audit must not throw.
+    } catch (err2) {
+      // Best-effort — audit must not throw, but log so failures are observable.
+      console.error("[wisp] audit.runFail failed:", err2);
     }
     return {
       ok: false,
