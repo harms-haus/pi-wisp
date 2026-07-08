@@ -65,12 +65,56 @@ export function paramValidationError(message: string): {
 // ─── Terminal-node synthesis ─────────────────────────────────────
 
 /**
+ * Reconstruct the dynamic fan-out child -> consumer `dep` edges that the engine
+ * wires at expansion time (see `expandFanOut`), so sink detection below can see
+ * them.
+ *
+ * The static `graph.json` edges only record the fan-out parent -> consumer
+ * relationship; the expanded children (`<fanOutId>-<index>`) are created at
+ * runtime and are absent from the stored IR. For each static `dep` edge whose
+ * source is a `fanOut` node, this adds a `dep` edge from every expanded child
+ * present in `summaryNodeIds` to that edge's target. Returns a copy of the
+ * input edges (unchanged) when there are no fan-out nodes.
+ */
+export function augmentEdgesWithFanOutChildren(
+  edges: readonly IREdge[],
+  irNodes: readonly { id: string; kind?: string }[],
+  summaryNodeIds: ReadonlySet<string>,
+): IREdge[] {
+  const fanOutIds = new Set(irNodes.filter((n) => n.kind === "fanOut").map((n) => n.id));
+  if (fanOutIds.size === 0) return [...edges];
+  const augmented = [...edges];
+  for (const e of edges) {
+    if (e.kind !== "dep" || !fanOutIds.has(e.from)) continue;
+    let i = 0;
+    for (;;) {
+      const childId = `${e.from}-${i}`;
+      if (!summaryNodeIds.has(childId)) break;
+      augmented.push({ from: childId, to: e.to, kind: "dep" });
+      i++;
+    }
+  }
+  return augmented;
+}
+
+/**
  * Find the DAG terminal (graph-sink) node among completed nodes.
  *
- * A terminal node is a completed node with no outgoing `dep` edge to an
- * incomplete node — i.e. every node that depends on it is also completed.
- * Returns `undefined` when the terminal cannot be unambiguously identified
- * (no edges available, zero or multiple candidates).
+ * Preference order:
+ *   1. A completed node with NO outgoing edge of any kind to any known node —
+ *      a true graph sink (nothing consumes it), i.e. the workflow's final
+ *      result. When several exist, prefer the one with non-empty output (this
+ *      drops grouping/placeholder nodes like `parallel`/`sequence` and fan-out
+ *      parents, which complete with no output).
+ *   2. Otherwise, a completed node with no outgoing `dep` edge to an incomplete
+ *      node (every consumer is also completed) — the looser "no pending
+ *      consumer" definition.
+ *
+ * Returns `undefined` when the terminal is ambiguous (no edges, or multiple
+ * candidates with no tie-breaker). Dynamic fan-out children must be surfaced
+ * via {@link augmentEdgesWithFanOutChildren} first, so a `reduce` over a
+ * fan-out is identified as the sink instead of the (edgeless-in-the-IR)
+ * children.
  */
 export function findTerminalNode(
   completed: RunSummaryNode[],
@@ -78,22 +122,28 @@ export function findTerminalNode(
   edges: IREdge[] | undefined,
 ): RunSummaryNode | undefined {
   if (!edges || edges.length === 0) return undefined;
-
-  const completedIds = new Set(completed.map((n) => n.id));
   const allIds = new Set(allNodes.map((n) => n.id));
 
-  // Filter dep edges that are within our graph.
+  // 1. True sinks: completed nodes with no outgoing edge (any kind).
+  const trueSinks = completed.filter(
+    (n) => !edges.some((e) => e.from === n.id && allIds.has(e.to)),
+  );
+  if (trueSinks.length >= 1) {
+    if (trueSinks.length === 1) return trueSinks[0];
+    const withOutput = trueSinks.filter((n) => (n.finalText ?? "").length > 0);
+    if (withOutput.length === 1) return withOutput[0];
+  }
+
+  // 2. Fallback: completed nodes with no outgoing dep edge to an incomplete node.
+  const completedIds = new Set(completed.map((n) => n.id));
   const relevantDepEdges = edges.filter(
     (e) => e.kind === "dep" && allIds.has(e.from) && allIds.has(e.to),
   );
-
-  // Find completed nodes that have NO outgoing dep edge to an incomplete node.
-  const terminals = completed.filter((completedNode) => {
+  const depTerminals = completed.filter((completedNode) => {
     const outgoingDepEdges = relevantDepEdges.filter((e) => e.from === completedNode.id);
     return !outgoingDepEdges.some((e) => !completedIds.has(e.to));
   });
-
-  return terminals.length === 1 ? terminals[0] : undefined;
+  return depTerminals.length === 1 ? depTerminals[0] : undefined;
 }
 
 /** Extract the synthesized result text from a successful run. */

@@ -17,6 +17,7 @@ import type { RunSummaryNode, RunSummary } from "../../engine/events.js";
 import {
   wispErrorToDetails,
   paramValidationError,
+  augmentEdgesWithFanOutChildren,
   findTerminalNode,
   extractSynthesizedOutput,
   buildSuccessResult,
@@ -127,22 +128,103 @@ describe("findTerminalNode", () => {
     expect(findTerminalNode([a, b], [a, b, c], edges)).toBe(b);
   });
 
-  it("returns undefined when there are zero or multiple candidates (chain)", () => {
-    // a -> b, both completed: both have no outgoing edge to an *incomplete*
-    // node, yielding two candidates → undefined.
+  it("returns the true graph-sink of a completed chain", () => {
+    // a -> b, both completed. b is the unique node with no outgoing edge
+    // (a true sink), so it is the terminal — not ambiguous.
     const a = node("a");
     const b = node("b");
     const edges = [edge("a", "b")];
-    expect(findTerminalNode([a, b], [a, b], edges)).toBeUndefined();
+    expect(findTerminalNode([a, b], [a, b], edges)).toBe(b);
   });
 
-  it("ignores non-dep edges (only 'dep' edges count)", () => {
+  it("ignores non-dep edges when finding a true sink (falls back to dep)", () => {
     // a has a fanOut edge to an incomplete node c, but fanOut is not a dep
-    // edge, so a is still the unique terminal.
+    // edge, so a has no outgoing dep edge to an incomplete node and is the
+    // fallback terminal.
     const a = node("a");
     const c = node("c", { status: "pending" });
     const edges = [edge("a", "c", "fanOut")];
     expect(findTerminalNode([a], [a, c], edges)).toBe(a);
+  });
+
+  it("prefers a true sink with output over an empty placeholder sink", () => {
+    // Two completed nodes with no outgoing edges: an empty placeholder
+    // (e.g. a `parallel` grouping node) and a real result node. A producer
+    // feeds both (so edges are non-empty) but neither has outgoing edges. The
+    // sink with output wins.
+    const producer = node("gen", { finalText: "{}" });
+    const placeholder = node("grp"); // no finalText
+    const result = node("synth", { finalText: "PRIMER" });
+    const all = [producer, placeholder, result];
+    const edges = [edge("gen", "grp", "dep"), edge("gen", "synth", "dep")];
+    expect(findTerminalNode(all, all, edges)).toBe(result);
+  });
+
+  it("identifies a reduce over a fan-out as the sink (children wired to it)", () => {
+    // gen -> answer(fanOut) -> synth(reduce). The dynamic children answer-0..2
+    // are wired to synth (as augmentEdgesWithFanOutChildren does), so synth is
+    // the unique true sink and the children are not.
+    const gen = node("gen", { finalText: "{}" });
+    const fan = node("answer", { finalText: "" });
+    const c0 = node("answer-0", { finalText: "A0" });
+    const c1 = node("answer-1", { finalText: "A1" });
+    const c2 = node("answer-2", { finalText: "A2" });
+    const synth = node("synth", { finalText: '{"primer":"..."}' });
+    const all = [gen, fan, c0, c1, c2, synth];
+    const edges = [
+      edge("gen", "answer", "fanOut"),
+      edge("answer", "synth", "dep"),
+      // children wired to synth (reconstructed at runtime):
+      edge("answer-0", "synth", "dep"),
+      edge("answer-1", "synth", "dep"),
+      edge("answer-2", "synth", "dep"),
+    ];
+    expect(findTerminalNode(all, all, edges)).toBe(synth);
+  });
+});
+
+// ─── augmentEdgesWithFanOutChildren ─────────────────────────────
+
+describe("augmentEdgesWithFanOutChildren", () => {
+  it("adds a dep edge from each expanded child to the fan-out's consumers", () => {
+    const irNodes = [
+      { id: "gen", kind: "node" },
+      { id: "answer", kind: "fanOut" },
+      { id: "synth", kind: "reduce" },
+    ];
+    const edges = [edge("gen", "answer", "fanOut"), edge("answer", "synth", "dep")];
+    const summaryIds = new Set(["gen", "answer", "synth", "answer-0", "answer-1", "answer-2"]);
+    const out = augmentEdgesWithFanOutChildren(edges, irNodes, summaryIds);
+    expect(out).toContainEqual(edge("answer-0", "synth", "dep"));
+    expect(out).toContainEqual(edge("answer-2", "synth", "dep"));
+    // Original edges preserved.
+    expect(out).toHaveLength(5);
+  });
+
+  it("returns the edges unchanged when there are no fan-out nodes", () => {
+    const irNodes = [
+      { id: "a", kind: "node" },
+      { id: "b", kind: "node" },
+    ];
+    const edges = [edge("a", "b", "dep")];
+    const out = augmentEdgesWithFanOutChildren(edges, irNodes, new Set(["a", "b"]));
+    expect(out).toEqual(edges);
+  });
+
+  it("only wires children actually present in the summary", () => {
+    const irNodes = [
+      { id: "answer", kind: "fanOut" },
+      { id: "r", kind: "reduce" },
+    ];
+    const edges = [edge("answer", "r", "dep")];
+    // Only answer-0 expanded (answer-1 absent).
+    const out = augmentEdgesWithFanOutChildren(
+      edges,
+      irNodes,
+      new Set(["answer", "r", "answer-0"]),
+    );
+    expect(out).toContainEqual(edge("answer-0", "r", "dep"));
+    expect(out.some((e) => e.from === "answer-1")).toBe(false);
   });
 });
 

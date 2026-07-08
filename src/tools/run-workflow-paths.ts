@@ -15,6 +15,7 @@ import { piAdapter } from "../adapters/pi.js";
 import { builderPath, harnessPath } from "../constants.js";
 
 import {
+  augmentEdgesWithFanOutChildren,
   buildFailureResult,
   buildSuccessResult,
   isValidationError,
@@ -108,7 +109,14 @@ export async function executeResumePath(
   });
 
   clearTUI(ctx);
-  if (result.ok) return buildSuccessResult(result, prepared.ir.edges);
+  if (result.ok) {
+    const edges = augmentEdgesWithFanOutChildren(
+      prepared.ir.edges,
+      prepared.ir.nodes,
+      new Set(result.summary.nodes.map((n) => n.id)),
+    );
+    return buildSuccessResult(result, edges);
+  }
   return buildFailureResult(result);
 }
 
@@ -168,6 +176,13 @@ export async function executeFreshPath(
   const result = await runWorkflow({ scriptSource: script, scriptPath: path, ir, ...base });
 
   clearTUI(ctx);
-  if (result.ok) return buildSuccessResult(result, ir.edges);
+  if (result.ok) {
+    const edges = augmentEdgesWithFanOutChildren(
+      ir.edges,
+      ir.nodes,
+      new Set(result.summary.nodes.map((n) => n.id)),
+    );
+    return buildSuccessResult(result, edges);
+  }
   return buildFailureResult(result);
 }
