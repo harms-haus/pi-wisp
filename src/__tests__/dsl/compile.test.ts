@@ -8,9 +8,6 @@
 //   (d) Import rewrite helper  → rewritten source contains file:// URL
 //   (e) Invalid-cycle fixture  → { error: { kind: "validation", errors: [...] } }
 //
-// **RED phase — all tests fail because both compileWorkflow and rewriteImport**
-// **throw `Error("STUB: not yet implemented")`.**
-// Once the production implementation lands (S16), these turn GREEN.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { describe, it, expect } from "vitest";
@@ -91,7 +88,6 @@ describe("compileWorkflow", () => {
 
   describe("(a) valid workflow", () => {
     it("returns { ir: GraphIR } with the expected nodes when given a valid workflow script", async () => {
-      // RED: compileWorkflow throws → test fails
       const result = await compileWorkflow(fixtureInput("valid-workflow.ts"));
       expectSuccess(result);
 
@@ -126,7 +122,6 @@ describe("compileWorkflow", () => {
     });
 
     it("returns a GraphIR with valid edges and conditions arrays (not undefined)", async () => {
-      // RED: compileWorkflow throws → test fails
       const result = await compileWorkflow(fixtureInput("valid-workflow.ts"));
       expectSuccess(result);
       const ir = result.ir;
@@ -144,22 +139,18 @@ describe("compileWorkflow", () => {
 
   describe("(b) syntax error", () => {
     it("returns { error: { kind: 'compile', message, location? } } when the script has a syntax error", async () => {
-      // RED: compileWorkflow throws → test fails
       const result = await compileWorkflow(fixtureInput("syntax-error.ts"));
       expectError(result, "compile");
       const err = result.error;
       // The error should include a hint about the nature of the syntax problem
       expect(err.message).toMatch(/expected|unexpected|missing|SyntaxError/i);
-      // A location (file:line:col) should be present when the parser can report one
-      // During RED phase this location may be undefined; once implemented it should
-      // carry the offending line/col.
+      // A location (file:line:col) should be present when the parser can report one.
       if (err.location) {
         expect(typeof err.location).toBe("string");
       }
     });
 
     it("records a meaningful line number in the location string when available", async () => {
-      // RED: compileWorkflow throws → test fails
       const result = await compileWorkflow(fixtureInput("syntax-error.ts"));
       expectError(result, "compile");
       const err = result.error;
@@ -174,7 +165,6 @@ describe("compileWorkflow", () => {
 
   describe("(c) runtime throw", () => {
     it("returns { error: { kind: 'runtime', message } } when the script throws at module evaluation", async () => {
-      // RED: compileWorkflow throws → test fails
       const result = await compileWorkflow(fixtureInput("runtime-throw.ts"));
       expectError(result, "runtime");
       const err = result.error;
@@ -183,7 +173,6 @@ describe("compileWorkflow", () => {
     });
 
     it("captures the full thrown error message (not a generic 'script failed')", async () => {
-      // RED: compileWorkflow throws → test fails
       const result = await compileWorkflow(fixtureInput("runtime-throw.ts"));
       expectError(result, "runtime");
       // "module evaluation failed" — the exact message thrown by the fixture
@@ -198,7 +187,6 @@ describe("compileWorkflow", () => {
       const source = `import { wf } from "pi-wisp";\nexport default wf("test");`;
       const fileUrl = "file:///home/user/wisp/src/dsl/builder.ts";
 
-      // RED: rewriteImport throws → test fails
       const rewritten = rewriteImport(source, fileUrl);
 
       // The rewritten source must NOT contain the bare specifier "pi-wisp"
@@ -214,7 +202,6 @@ describe("compileWorkflow", () => {
       const source = `import { wf } from 'pi-wisp';\nexport default wf("test");`;
       const fileUrl = "file:///home/user/wisp/src/dsl/builder.ts";
 
-      // RED: rewriteImport throws → test fails
       const rewritten = rewriteImport(source, fileUrl);
 
       expect(rewritten).not.toContain("'pi-wisp'");
@@ -227,7 +214,6 @@ describe("compileWorkflow", () => {
       const source = `import wf from "pi-wisp";\nexport default wf("test");`;
       const fileUrl = "file:///home/user/wisp/src/dsl/builder.ts";
 
-      // RED: rewriteImport throws → test fails
       const rewritten = rewriteImport(source, fileUrl);
 
       expect(rewritten).not.toContain('"pi-wisp"');
@@ -238,7 +224,6 @@ describe("compileWorkflow", () => {
       const source = `import * as wisp from "pi-wisp";\nwisp.wf("test");`;
       const fileUrl = "file:///home/user/wisp/src/dsl/builder.ts";
 
-      // RED: rewriteImport throws → test fails
       const rewritten = rewriteImport(source, fileUrl);
 
       expect(rewritten).not.toContain('"pi-wisp"');
@@ -249,7 +234,6 @@ describe("compileWorkflow", () => {
       const source = `const wisp = await import("pi-wisp");\nwisp.wf("test");`;
       const fileUrl = "file:///home/user/wisp/src/dsl/builder.ts";
 
-      // RED: rewriteImport throws → test fails
       const rewritten = rewriteImport(source, fileUrl);
 
       expect(rewritten).not.toContain('"pi-wisp"');
@@ -268,7 +252,6 @@ describe("compileWorkflow", () => {
       ].join("\n");
       const fileUrl = "file:///home/user/wisp/src/dsl/builder.ts";
 
-      // RED: rewriteImport throws → test fails
       const rewritten = rewriteImport(source, fileUrl);
 
       // The pi-wisp specifier is replaced
@@ -286,7 +269,6 @@ describe("compileWorkflow", () => {
       const source = `import { readFile } from "node:fs";\nconsole.log("no wisp here");`;
       const fileUrl = "file:///home/user/wisp/src/dsl/builder.ts";
 
-      // RED: rewriteImport throws → test fails
       const rewritten = rewriteImport(source, fileUrl);
 
       // Source should be returned as-is
@@ -295,19 +277,13 @@ describe("compileWorkflow", () => {
 
     // ── (a) SUBPATH import rewrite ────────────────────────────────────
     //
-    // code-quality MEDIUM: subpath imports like "pi-wisp/macros" must also
-    // be rewritten to the builder file:// URL (not left as bare specifier).
-    //
-    // Currently RED: rewriteImport only replaces the exact string "pi-wisp",
-    // leaving "pi-wisp/macros" untouched.
+    // Subpath imports like "pi-wisp/macros" must also be rewritten to the
+    // builder file:// URL (not left as bare specifier).
 
     it('rewrites subpath imports: `from "pi-wisp/macros"` → builder URL', () => {
       const source = `import { x } from "pi-wisp/macros";\nexport default wf("test");`;
       const fileUrl = "file:///home/user/wisp/src/dsl/builder.ts";
 
-      // RED: rewriteImport only replaces "pi-wisp" verbatim → subpath is
-      // NOT caught by the naive replaceAll. This test asserts the subpath
-      // specifier MUST be rewritten (or produce a clear error).
       const rewritten = rewriteImport(source, fileUrl);
 
       // The subpath specifier must NOT remain as bare "pi-wisp/macros"
@@ -321,12 +297,8 @@ describe("compileWorkflow", () => {
 
     // ── (b) NON-IMPORT occurrences NOT rewritten ──────────────────────
     //
-    // code-quality MEDIUM: `pi-wisp` appearing inside a COMMENT or a
-    // STRING LITERAL that is NOT an import specifier must be left
-    // unchanged. Only real import positions should be rewritten.
-    //
-    // Currently RED: the naive replaceAll also hits strings like
-    // `const pkg = "pi-wisp"`, corrupting non-import content.
+    // `pi-wisp` appearing inside a comment or a string literal that is not
+    // an import specifier must be left unchanged.
 
     it("does NOT rewrite `pi-wisp` inside comments or string literals", () => {
       const source = [
@@ -337,9 +309,6 @@ describe("compileWorkflow", () => {
       ].join("\n");
       const fileUrl = "file:///home/user/wisp/src/dsl/builder.ts";
 
-      // RED: rewriteImport replaces ALL "pi-wisp" → the string literal is
-      // corrupted. This test asserts that only the import-position occurrence
-      // is rewritten.
       const rewritten = rewriteImport(source, fileUrl);
 
       // The real import specifier IS rewritten
@@ -361,7 +330,6 @@ describe("compileWorkflow", () => {
 
   describe("(e) invalid cycle", () => {
     it("returns { error: { kind: 'validation', errors: [...] } } when the graph has a cycle", async () => {
-      // RED: compileWorkflow throws → test fails
       const result = await compileWorkflow(fixtureInput("invalid-cycle.ts"));
       expectError(result, "validation");
       const err = result.error;
@@ -387,9 +355,6 @@ describe("compileWorkflow — edge cases", () => {
       builderPath: BUILDER_PATH,
       harnessPath: HARNESS_PATH,
     };
-    // RED: compileWorkflow throws → test fails
-    // The implementation SHOULD reject with a structured error; during RED
-    // phase the stub throws before reaching that logic.
     await expect(compileWorkflow(input)).rejects.toThrow();
   });
 
@@ -399,7 +364,6 @@ describe("compileWorkflow — edge cases", () => {
       builderPath: "",
       harnessPath: HARNESS_PATH,
     };
-    // RED: compileWorkflow throws → test fails
     await expect(compileWorkflow(input)).rejects.toThrow();
   });
 
@@ -409,19 +373,14 @@ describe("compileWorkflow — edge cases", () => {
       builderPath: BUILDER_PATH,
       harnessPath: "",
     };
-    // RED: compileWorkflow throws → test fails
     await expect(compileWorkflow(input)).rejects.toThrow();
   });
 
   // ── (c) MISSING scriptPath → structured error ─────────────────────
   //
-  // code-quality MEDIUM: a non-existent scriptPath should return
-  // { error: { kind: "compile", message: "...not found..." } } — NOT
+  // A non-existent scriptPath should return
+  // { error: { kind: "compile", message: "...not found..." } } — not
   // throw a raw ENOENT from readFileSync.
-  //
-  // Currently RED: readWorkflowSource calls readFileSync which throws
-  // synchronously (the async function rejects) before any error
-  // classification can wrap it into a structured result.
 
   it("returns structured compile error (not raw ENOENT) when scriptPath does not exist", async () => {
     const result = await compileWorkflow({
@@ -444,13 +403,9 @@ describe("compileWorkflow — edge cases", () => {
 
   // ── (d) RELATIVE path rejection ────────────────────────────────────
   //
-  // code-quality MEDIUM: a relative builderPath or harnessPath must be
-  // rejected with a clear error (e.g. "builderPath must be an absolute
-  // path") — NOT an opaque spawn ENOENT.
-  //
-  // Currently RED: validateCompileInput only checks for empty/blank
-  // strings, so a relative path passes through and reaches the subprocess
-  // layer, producing an inscrutable module-not-found or spawn failure.
+  // A relative builderPath or harnessPath must be rejected with a clear
+  // error (e.g. "builderPath must be an absolute path") — not an opaque
+  // spawn ENOENT.
 
   it("rejects relative harnessPath with a clear error (not opaque ENOENT)", async () => {
     const result = await compileWorkflow({

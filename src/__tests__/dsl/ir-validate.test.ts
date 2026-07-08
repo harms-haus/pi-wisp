@@ -5,7 +5,6 @@
 // violation. Each error must have { kind: "validation", nodeId?, message,
 // location? }. Empty array = valid.
 //
-// **RED phase — all tests fail because the stub throws.**
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { describe, it, expect } from "vitest";

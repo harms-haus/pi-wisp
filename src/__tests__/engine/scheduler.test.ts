@@ -5,8 +5,6 @@
 // adapters, no spawning. Every node is a plain `SchedulableNode` object with
 // agentType / provider / model.
 //
-// RED phase — all tests fail because createScheduler() is a stub throwing
-// NotImplementedError.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { describe, it, expect } from "vitest";
@@ -91,8 +89,7 @@ describe("createScheduler", () => {
 // ─── Pool membership — which pools a node belongs to ──────────────
 //
 // These tests assert that the scheduler correctly determines the set of
-// pools a node requires. In the RED phase every test fails because the stub
-// throws; once implemented, the membership logic is:
+// pools a node requires. The membership logic is:
 //
 //   pools = [global]
 //   if agentType limit exists       → pools += byAgentType[agentType]

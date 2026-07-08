@@ -5,9 +5,6 @@
 // invariants (unique ids, dependsOn validation), options capture, and the
 // §4.1 example expressed in raw atoms (no macros).
 //
-// **RED phase — all tests fail because the stubs throw.**
-// The stubs throw `Error("STUB: not yet implemented")`; once production code
-// is written these tests will turn GREEN.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { describe, it, expect } from "vitest";
@@ -19,7 +16,6 @@ import type { GraphIR, IRNode } from "../../types.js";
 
 describe("wf entry point", () => {
   it("wf(name) returns a WorkflowBuilder instance", () => {
-    // RED: wf() throws → test fails
     const builder = wf("my-workflow");
     expect(builder).toBeDefined();
     expect(typeof builder.node).toBe("function");
@@ -35,7 +31,6 @@ describe("wf entry point", () => {
   });
 
   it("wf(name, { maxConcurrency, defaultRetries, title }) records options", () => {
-    // RED: wf() throws → test fails
     const builder = wf("test", { maxConcurrency: 5, defaultRetries: 2, title: "Custom Title" });
     const ir = builder.toIR();
     expect(ir.options.maxConcurrency).toBe(5);
@@ -43,7 +38,6 @@ describe("wf entry point", () => {
   });
 
   it("wf(name) with no options sets defaults", () => {
-    // RED: wf() throws → test fails
     const builder = wf("minimal");
     const ir = builder.toIR();
     expect(ir.options).toBeDefined();
@@ -137,16 +131,14 @@ describe("builder.node()", () => {
   });
 
   it("rejects duplicate node ids with a descriptive error", () => {
-    // This test expects the STUB to throw — in RED phase this will pass
-    // (the stub throws). In GREEN phase this test stays valid.
+    // This test expects an error: duplicate node ids are rejected.
     const builder = wf("dupes");
     builder.node("a", { prompt: "first" });
     expect(() => builder.node("a", { prompt: "second" })).toThrow(/duplicate|already exists/i);
   });
 
   it("rejects dangling dependsOn references with a descriptive error", () => {
-    // This test expects an error — in RED phase the stub throws,
-    // in GREEN phase the production code should also throw.
+    // This test expects an error: dangling dependsOn references are rejected.
     const builder = wf("dangling-dep");
     expect(() => builder.node("orphan", { prompt: "missing dep", dependsOn: ["phantom"] })).toThrow(
       /dependsOn|phantom|not found/i,

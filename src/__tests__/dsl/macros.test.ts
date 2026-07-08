@@ -6,7 +6,6 @@
 // for stage labeling, and that reviewLoop's worker references are preserved
 // for transcript-replay (D4).
 //
-// **RED phase — all tests fail because the stubs throw.**
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { describe, it, expect } from "vitest";
@@ -19,7 +18,6 @@ import type { IRNode } from "../../types.js";
 
 describe("expandReviewLoop", () => {
   it("expands to a loop with body (worker → gate) and cond for accept/reject", () => {
-    // RED: expandReviewLoop throws → test fails
     const opts: ReviewLoopOptions = {
       worker: { prompt: "Write code", profileRef: "coder" },
       gate: { prompt: "Review code", profileRef: "reviewer" },
@@ -96,7 +94,6 @@ describe("expandReviewLoop", () => {
 
 describe("expandCouncil", () => {
   it("expands to a parallel of members followed by a reduce synthesize node", () => {
-    // RED: expandCouncil throws → test fails
     const opts: CouncilOptions = {
       members: [
         { prompt: "Research A", profileRef: "researcher" },
@@ -144,7 +141,6 @@ describe("expandCouncil", () => {
 
 describe("expandReviewFix", () => {
   it("expands to reviewer → fanOut(workers) → optional merge", () => {
-    // RED: expandReviewFix throws → test fails
     const opts: ReviewFixOptions = {
       reviewer: { prompt: "Review code", profileRef: "reviewer" },
       workers: (_ctx: unknown) => [

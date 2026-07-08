@@ -7,8 +7,6 @@
 // capture, abort escalation (SIGTERM→SIGKILL→force-resolve), and exit-code
 // propagation are tested in isolation.
 //
-// RED phase: both `runAgent` and `killProcessTree` are stubs that throw.
-// After the production implementation, every test below must pass.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { type ChildProcess, spawn } from "node:child_process";
