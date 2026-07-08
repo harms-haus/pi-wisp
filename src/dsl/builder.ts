@@ -20,7 +20,7 @@ import type {
 } from "../types.js";
 import type { WispProfile } from "../profiles/types.js";
 import { inlineProfile } from "../profiles/inline.js";
-import { kebabCase } from "../utils.js";
+import { compact, kebabCase } from "../utils.js";
 import { serializeFn } from "./fn-serialize.js";
 import { live } from "./ir.js";
 import type { BuilderIR, BuilderNode } from "./ir.js";
@@ -199,13 +199,15 @@ function pickBaseFields(spec: NodeSpec): NodeBaseFields {
 function extractNodeBase(bn: BuilderNode): Omit<IRNodeBase, "kind"> {
   return {
     id: bn.id,
-    ...(bn.dependsOn !== undefined ? { dependsOn: [...bn.dependsOn] } : {}),
-    ...(bn.stage !== undefined ? { stage: bn.stage } : {}),
-    ...(bn.retries !== undefined ? { retries: bn.retries } : {}),
-    ...(bn.timeoutSec !== undefined ? { timeoutSec: bn.timeoutSec } : {}),
-    ...(bn.cwd !== undefined ? { cwd: bn.cwd } : {}),
-    ...(bn.outputSchema !== undefined ? { outputSchema: bn.outputSchema } : {}),
-    ...(bn.primitive !== undefined ? { primitive: { ...bn.primitive } } : {}),
+    ...compact({
+      dependsOn: bn.dependsOn ? [...bn.dependsOn] : undefined,
+      stage: bn.stage,
+      retries: bn.retries,
+      timeoutSec: bn.timeoutSec,
+      cwd: bn.cwd,
+      outputSchema: bn.outputSchema,
+      primitive: bn.primitive ? { ...bn.primitive } : undefined,
+    }),
   };
 }
 
@@ -217,12 +219,12 @@ function serializePlainNode(
   return {
     ...base,
     kind: "node",
-    ...(bn.agentType !== undefined ? { agentType: bn.agentType } : {}),
-    ...(bn.profileRef !== undefined ? { profileRef: bn.profileRef } : {}),
-    ...(bn.prompt !== undefined ? { prompt: bn.prompt } : {}),
-    ...(bn.promptFn !== undefined
-      ? { promptFnRef: serializeFn(bn.promptFn.fn, bn.promptFn.kind) }
-      : {}),
+    ...compact({
+      agentType: bn.agentType,
+      profileRef: bn.profileRef,
+      prompt: bn.prompt,
+      promptFnRef: bn.promptFn ? serializeFn(bn.promptFn.fn, bn.promptFn.kind) : undefined,
+    }),
   };
 }
 
@@ -251,7 +253,7 @@ function serializeCondNode(
     on: bn.on,
     whenFnRef: serializeFn(bn.when.fn, bn.when.kind),
     then: bn.then,
-    ...(bn.else !== undefined ? { else: bn.else } : {}),
+    ...compact({ else: bn.else }),
   };
 }
 
@@ -265,7 +267,7 @@ function serializeLoopNode(
     kind: "loop",
     body: bn.body,
     untilFnRef: serializeFn(bn.until.fn, bn.until.kind),
-    ...(bn.maxIterations !== undefined ? { maxIterations: bn.maxIterations } : {}),
+    ...compact({ maxIterations: bn.maxIterations }),
   };
 }
 
@@ -278,9 +280,11 @@ function serializeReduceNode(
     ...base,
     kind: "reduce",
     from: [...bn.from],
-    ...(bn.merge !== undefined ? { mergeFnRef: serializeFn(bn.merge.fn, bn.merge.kind) } : {}),
-    ...(bn.profileRef !== undefined ? { profileRef: bn.profileRef } : {}),
-    ...(bn.agentType !== undefined ? { agentType: bn.agentType } : {}),
+    ...compact({
+      mergeFnRef: bn.merge ? serializeFn(bn.merge.fn, bn.merge.kind) : undefined,
+      profileRef: bn.profileRef,
+      agentType: bn.agentType,
+    }),
   };
 }
 
@@ -363,9 +367,11 @@ class WorkflowBuilderImpl implements WorkflowBuilder {
       id,
       kind: "node",
       ...pickBaseFields(spec),
-      ...(spec.agentType !== undefined ? { agentType: spec.agentType } : {}),
-      ...(spec.profileRef !== undefined ? { profileRef: spec.profileRef } : {}),
-      ...(spec.prompt !== undefined ? { prompt: spec.prompt } : {}),
+      ...compact({
+        agentType: spec.agentType,
+        profileRef: spec.profileRef,
+        prompt: spec.prompt,
+      }),
     };
     this.addNode(node);
     if (spec.dependsOn) {
@@ -412,7 +418,7 @@ class WorkflowBuilderImpl implements WorkflowBuilder {
       on: opts.on,
       when: live(opts.when, "cond"),
       then: opts.then,
-      ...(opts.else !== undefined ? { else: opts.else } : {}),
+      ...compact({ else: opts.else }),
     });
     this.state.edges.push({ from: opts.on, to: id, kind: "dep" });
     if (typeof opts.then === "string") {
@@ -436,7 +442,7 @@ class WorkflowBuilderImpl implements WorkflowBuilder {
       kind: "loop",
       body: opts.body,
       until: live(opts.until, "until"),
-      ...(opts.maxIterations !== undefined ? { maxIterations: opts.maxIterations } : {}),
+      ...compact({ maxIterations: opts.maxIterations }),
     });
     this.state.edges.push({ from: opts.body, to: id, kind: "loop" });
     return this;
@@ -449,9 +455,11 @@ class WorkflowBuilderImpl implements WorkflowBuilder {
       id,
       kind: "reduce",
       from: [...opts.from],
-      ...(opts.merge !== undefined ? { merge: live(opts.merge, "merge") } : {}),
-      ...(opts.profile !== undefined ? { profileRef: opts.profile } : {}),
-      ...(opts.agentType !== undefined ? { agentType: opts.agentType } : {}),
+      ...compact({
+        merge: opts.merge ? live(opts.merge, "merge") : undefined,
+        profileRef: opts.profile,
+        agentType: opts.agentType,
+      }),
     });
     for (const member of opts.from) this.state.edges.push({ from: member, to: id, kind: "dep" });
     return this;

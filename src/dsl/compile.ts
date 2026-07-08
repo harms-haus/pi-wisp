@@ -31,6 +31,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { GraphIR, WispError } from "../types.js";
+import { compact } from "../utils.js";
 import { classifyStderr, genericFallback } from "./error-classify.js";
 import { rewriteImport } from "./import-rewrite.js";
 import { runSubprocess } from "./subprocess.js";
@@ -138,7 +139,7 @@ function resultFromSubprocess(result: SubprocessResult): CompileResult {
     const error: WispError = {
       kind: classified.kind,
       message: classified.message,
-      ...(classified.location !== undefined ? { location: classified.location } : {}),
+      ...compact({ location: classified.location }),
     };
     return { error };
   }

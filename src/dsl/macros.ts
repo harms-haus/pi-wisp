@@ -13,6 +13,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import type { IREdge, NodeSpec } from "../types.js";
+import { compact } from "../utils.js";
 import { live } from "./ir.js";
 import type { BuilderCondition, BuilderNode, LiveFn } from "./ir.js";
 
@@ -54,15 +55,17 @@ export function materializeNode(
   const node: BuilderNode = {
     id: fallbackId,
     kind: "node",
-    ...(spec.agentType !== undefined ? { agentType: spec.agentType } : {}),
-    ...(spec.profileRef !== undefined ? { profileRef: spec.profileRef } : {}),
-    ...(spec.prompt !== undefined ? { prompt: spec.prompt } : {}),
-    ...(spec.outputSchema !== undefined ? { outputSchema: spec.outputSchema } : {}),
-    ...(spec.dependsOn !== undefined ? { dependsOn: [...spec.dependsOn] } : {}),
-    ...(spec.stage !== undefined ? { stage: spec.stage } : {}),
-    ...(spec.retries !== undefined ? { retries: spec.retries } : {}),
-    ...(spec.timeoutSec !== undefined ? { timeoutSec: spec.timeoutSec } : {}),
-    ...(spec.cwd !== undefined ? { cwd: spec.cwd } : {}),
+    ...compact({
+      agentType: spec.agentType,
+      profileRef: spec.profileRef,
+      prompt: spec.prompt,
+      outputSchema: spec.outputSchema,
+      dependsOn: spec.dependsOn ? [...spec.dependsOn] : undefined,
+      stage: spec.stage,
+      retries: spec.retries,
+      timeoutSec: spec.timeoutSec,
+      cwd: spec.cwd,
+    }),
     primitive: { kind: primitiveKind, ...(primitiveMeta ? { meta: primitiveMeta } : {}) },
   };
   return node;
@@ -214,13 +217,13 @@ export function expandCouncil(id: string, opts: CouncilOptions): MacroExpansion 
     kind: "reduce",
     from: [...memberIds],
     profileRef: opts.synthesize.profile,
-    ...(opts.synthesize.agentType !== undefined ? { agentType: opts.synthesize.agentType } : {}),
+    ...compact({ agentType: opts.synthesize.agentType }),
     primitive: {
       kind: "council",
       meta: {
         macro: "council",
         role: "synthesize",
-        ...(opts.synthesize.prompt !== undefined ? { prompt: opts.synthesize.prompt } : {}),
+        ...compact({ prompt: opts.synthesize.prompt }),
       },
     },
   };
@@ -324,13 +327,13 @@ export function expandReviewFix(id: string, opts: ReviewFixOptions): MacroExpans
       kind: "reduce",
       from: [fanOutId],
       profileRef: opts.merge.profile,
-      ...(opts.merge.agentType !== undefined ? { agentType: opts.merge.agentType } : {}),
+      ...compact({ agentType: opts.merge.agentType }),
       primitive: {
         kind: "reviewFix",
         meta: {
           macro: "reviewFix",
           role: "merge",
-          ...(opts.merge.prompt !== undefined ? { prompt: opts.merge.prompt } : {}),
+          ...compact({ prompt: opts.merge.prompt }),
         },
       },
     };

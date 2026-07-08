@@ -10,6 +10,8 @@
 // runtime `<ErrorType>: <message>` pattern.
 // ═══════════════════════════════════════════════════════════════════════════
 
+import { compact } from "../utils.js";
+
 export interface Classified {
   kind: "compile" | "runtime";
   message: string;
@@ -65,7 +67,7 @@ export function matchCompileMarker(stderr: string): Classified | undefined {
   return {
     kind: "compile",
     message: markerLine.trim(),
-    ...(location !== undefined ? { location } : {}),
+    ...compact({ location }),
   };
 }
 

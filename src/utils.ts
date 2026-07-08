@@ -2,6 +2,25 @@
  * pi-wisp shared utilities.
  */
 
+// ─── compact ──────────────────────────────────────────────────────
+
+/**
+ * Return a shallow copy of `obj` with every `undefined`-valued entry
+ * omitted. Lets callers assemble an optional-property object literal in one
+ * place (`compact({ a, b, c })`) instead of one
+ * `...(x !== undefined ? { x } : {})` spread per field. `null` and other
+ * falsy-but-defined values are preserved; only `undefined` is stripped.
+ */
+export function compact<T extends Record<string, unknown>>(obj: T): Partial<T> {
+  const result: Partial<T> = {};
+  for (const key of Object.keys(obj) as (keyof T & string)[]) {
+    if (obj[key] !== undefined) {
+      result[key] = obj[key];
+    }
+  }
+  return result;
+}
+
 // ─── kebabCase ─────────────────────────────────────────────────────
 
 /**
