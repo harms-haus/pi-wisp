@@ -965,3 +965,150 @@ describe("runAgent — spawn error handling", () => {
     await expect(promise).rejects.toThrow(/ENOENT|spawn/);
   });
 });
+
+// ─── runAgent: stdin error listener cleanup (listener-leak fix) ────
+// runAgent attaches a no-op 'error' listener to proc.stdin to swallow
+// EPIPE / stream-destroyed errors. Because `proc` lives until the process
+// closes, leaving that listener attached leaks one listener per run. It must
+// be removed at every terminal path where `settled` is set to true.
+
+describe("runAgent — stdin error listener cleanup", () => {
+  let mockProcess: MockChildProcess;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockProcess = createMockProcess();
+    vi.mocked(spawn).mockReturnValue(mockProcess as unknown as ChildProcess);
+  });
+
+  it("attaches exactly one stdin 'error' listener while the process is alive", async () => {
+    const onEvent = vi.fn();
+    const onUpdate = vi.fn();
+
+    const promise = runAgent({
+      command: "pi",
+      args: [],
+      env: {},
+      stdinPrompt: "",
+      parseLine: nullParse,
+      onEvent,
+      onUpdate,
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    // The no-op stdin 'error' handler is registered during setup.
+    expect(mockProcess.stdin.listenerCount("error")).toBe(1);
+
+    mockProcess.emit("close", 0);
+    await promise;
+  });
+
+  it("removes the stdin 'error' listener after the process closes normally", async () => {
+    const onEvent = vi.fn();
+    const onUpdate = vi.fn();
+
+    const promise = runAgent({
+      command: "pi",
+      args: [],
+      env: {},
+      stdinPrompt: "",
+      parseLine: nullParse,
+      onEvent,
+      onUpdate,
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Listener present while alive
+    expect(mockProcess.stdin.listenerCount("error")).toBe(1);
+
+    mockProcess.emit("close", 0);
+    await promise;
+
+    // After close, the stdin 'error' listener must be removed so it does not
+    // accumulate across runs (proc outlives the promise resolution).
+    expect(mockProcess.stdin.listenerCount("error")).toBe(0);
+  });
+
+  it("removes the stdin 'error' listener when the process is killed by a signal", async () => {
+    const onEvent = vi.fn();
+    const onUpdate = vi.fn();
+
+    const promise = runAgent({
+      command: "pi",
+      args: [],
+      env: {},
+      stdinPrompt: "",
+      parseLine: nullParse,
+      onEvent,
+      onUpdate,
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(mockProcess.stdin.listenerCount("error")).toBe(1);
+
+    // Killed by a signal → close with null exit code
+    mockProcess.emit("close", null);
+    await promise;
+
+    expect(mockProcess.stdin.listenerCount("error")).toBe(0);
+  });
+
+  it("removes the stdin 'error' listener on the spawn-error path", async () => {
+    const onEvent = vi.fn();
+    const onUpdate = vi.fn();
+
+    const promise = runAgent({
+      command: "nonexistent-binary",
+      args: [],
+      env: {},
+      stdinPrompt: "",
+      parseLine: nullParse,
+      onEvent,
+      onUpdate,
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(mockProcess.stdin.listenerCount("error")).toBe(1);
+
+    mockProcess.emit("error", new Error("ENOENT: spawn nonexistent-binary ENOENT"));
+
+    await expect(promise).rejects.toThrow(/ENOENT|spawn/);
+
+    // Every terminal path that sets `settled = true` — including the
+    // spawn-error path — must detach the stdin 'error' listener.
+    expect(mockProcess.stdin.listenerCount("error")).toBe(0);
+  });
+
+  it("detaches the stdin 'error' listener via removeListener on close", async () => {
+    const onEvent = vi.fn();
+    const onUpdate = vi.fn();
+
+    const removeSpy = vi.spyOn(mockProcess.stdin, "removeListener");
+
+    const promise = runAgent({
+      command: "pi",
+      args: [],
+      env: {},
+      stdinPrompt: "",
+      parseLine: nullParse,
+      onEvent,
+      onUpdate,
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    mockProcess.emit("close", 0);
+    await promise;
+
+    // The implementation must explicitly remove the named stdin 'error'
+    // handler — not just rely on the stream being garbage-collected.
+    const removeCallsForError = removeSpy.mock.calls.filter(([event]) => event === "error");
+    expect(removeCallsForError.length).toBe(1);
+    expect(removeCallsForError[0]![1]).toBeTypeOf("function");
+    removeSpy.mockRestore();
+  });
+});

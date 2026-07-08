@@ -120,9 +120,12 @@ export function runAgent(options: RunAgentOptions): Promise<RunAgentResult> {
 
     // Ignore stdin write errors (EPIPE / stream destroyed) — the process may
     // have exited before we finished writing; real failures surface via exit.
-    proc.stdin.on("error", () => {
+    // Captured as a named handler so it can be removed on every terminal path
+    // (proc outlives the promise), preventing one leaked listener per run.
+    const onStdinError = (): void => {
       /* no-op */
-    });
+    };
+    proc.stdin.on("error", onStdinError);
 
     // Abort handling: kill the process tree on cancellation. The listener is
     // captured so it can be removed on every terminal path (close / error) to
@@ -146,6 +149,7 @@ export function runAgent(options: RunAgentOptions): Promise<RunAgentResult> {
     proc.on("error", (err: Error) => {
       if (settled) return;
       settled = true;
+      proc.stdin.removeListener("error", onStdinError);
       removeAbortListener?.();
       reject(err);
     });
@@ -161,6 +165,7 @@ export function runAgent(options: RunAgentOptions): Promise<RunAgentResult> {
         stdoutBuffer = "";
       }
       settled = true;
+      proc.stdin.removeListener("error", onStdinError);
       onUpdate();
       removeAbortListener?.();
       resolve({ exitCode: code, stderr: stderrText });
