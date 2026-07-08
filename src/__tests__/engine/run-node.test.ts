@@ -25,6 +25,9 @@ import type { SchedulableNode } from "../../engine/scheduler.js";
 
 import type { FnDescriptor, GraphIR, IRNode, NormalizedEvent } from "../../types.js";
 import type { AgentAdapter, NodeInvocationContext } from "../../adapters/types.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createScheduler } from "../../engine/scheduler.js";
 import { createFakeAdapter } from "../helpers/fake-adapter.js";
 import {
@@ -33,6 +36,7 @@ import {
   type MakeCtxOptions,
 } from "../helpers/executor-context.js";
 import { makeRunState, fn } from "../helpers/fixtures.js";
+import { readSession } from "../../run/sessions.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -509,6 +513,64 @@ describe("runNode", () => {
     expect(rt.endedAt).toBeGreaterThanOrEqual(rt.startedAt!);
     // Slot released back to the pool.
     expect(ctx.scheduler.usage().global.used).toBe(0);
+  });
+
+  it("persists the node's session transcript to <runDir>/sessions/<id>.json", async () => {
+    const tmpRunDir = mkdtempSync(join(tmpdir(), "wisp-session-"));
+    try {
+      const ir = singleNodeIR("n");
+      const ctx = ctxFor(ir, {
+        getAdapter: () =>
+          scriptedAdapter(() => [
+            { type: "session", id: "sess-persist" },
+            { type: "tool_call", name: "read", args: { path: "README.md" } },
+            {
+              type: "done",
+              sessionId: "sess-persist",
+              finalText: "the answer",
+              durationMs: 9,
+              toolCallCount: 1,
+            },
+          ]),
+      });
+      ctx.options.runDir = tmpRunDir;
+      const node = ctx.nodeMap.get("n")!;
+      const schedulable = acquireAndRun(ctx, node);
+
+      await runNode(ctx, node, schedulable);
+
+      const session = readSession(tmpRunDir, "sess-persist");
+      expect(session).toBeDefined();
+      expect(session!.sessionId).toBe("sess-persist");
+      expect(session!.nodeId).toBe("n");
+      expect(session!.agentType).toBe("pi");
+      expect(session!.finalText).toBe("the answer");
+      expect(session!.toolCallCount).toBe(1);
+      // The full event transcript is captured as messages.
+      expect(session!.messages).toHaveLength(3);
+      expect(session!.messages[0]).toMatchObject({ type: "session", id: "sess-persist" });
+      const toolCalls = session!.messages.filter(
+        (m) => (m as NormalizedEvent).type === "tool_call",
+      );
+      expect((toolCalls[0] as { name: string }).name).toBe("read");
+    } finally {
+      rmSync(tmpRunDir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips writing a session when no runDir is set (e.g. in-memory tests)", async () => {
+    const ir = singleNodeIR("n");
+    const ctx = ctxFor(ir, {
+      getAdapter: () =>
+        scriptedAdapter(() => [
+          { type: "session", id: "sess-noop" },
+          { type: "done", sessionId: "sess-noop", finalText: "x", durationMs: 1, toolCallCount: 0 },
+        ]),
+    });
+    // ctx.options.runDir intentionally unset.
+    const node = ctx.nodeMap.get("n")!;
+    await runNode(ctx, node, acquireAndRun(ctx, node));
+    expect(ctx.runState.nodes.get("n")?.status).toBe("completed");
   });
 
   it("synthesizes a done event when the adapter stream lacks one", async () => {

@@ -85,6 +85,12 @@ export interface ExecuteDAGOptions {
   /** Profile resolution options passed to resolveProfileSync for each node. */
   profiles?: ResolveOptions;
   /**
+   * Absolute path to the run directory. When set, each agent node's session
+   * transcript is persisted to `<runDir>/sessions/<sessionId>.json` on
+   * completion (success or failure). Omitted in tests that don't write to disk.
+   */
+  runDir?: string;
+  /**
    * Optional audit logger for per-node lifecycle events (start, tool, retry,
    * complete, fail, skip). When provided, node-level events are emitted to
    * the audit log as the node runs.

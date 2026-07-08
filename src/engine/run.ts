@@ -390,6 +390,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<RunWorkf
       retryBackoffMs: options.retryBackoffMs,
       profiles: mergedProfiles,
       audit,
+      runDir,
     });
   } catch (err) {
     runState.status = "error";

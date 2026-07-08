@@ -21,6 +21,8 @@ import type { SchedulableNode, Scheduler } from "./scheduler.js";
 import type { RunAgentResult } from "../spawn/spawner.js";
 import { resolvePolicy, shouldRetry, backoffMs, propagateSkip, type SkipReason } from "./retry.js";
 import { rehydrateFn } from "../dsl/fn-serialize.js";
+import { resolveProfileSync } from "../profiles/resolve.js";
+import { writeSession, type PersistedSession } from "../run/sessions.js";
 import { createNodeCtx } from "./context.js";
 import {
   invokeAdapter,
@@ -411,15 +413,62 @@ export async function runNode(
           slot = slotHandle(ctx.scheduler, schedulable);
           continue;
         }
+        persistNodeSession(ctx, node, rt, events);
         return;
       }
       if ((await handleError(ctx, node, rt, schedulable, attempt, outcome)) === "retry") {
         slot = slotHandle(ctx.scheduler, schedulable);
         continue;
       }
+      persistNodeSession(ctx, node, rt, events);
       return;
     }
   } finally {
     slot.release();
+  }
+}
+
+/**
+ * Persist a node's final attempt as a session file under `<runDir>/sessions/`.
+ *
+ * Writes the full event transcript (messages), final text, telemetry, and any
+ * error so the run directory contains every agent session — used for
+ * inspection and to re-enrich `finalText` on resume. Skipped silently when
+ * there is no run dir (tests) or no sessionId (e.g. the adapter never emitted
+ * a `session` event). Never throws: a failed write is warned, not fatal.
+ */
+function persistNodeSession(
+  ctx: ExecutorContext,
+  node: IRNode,
+  rt: NodeRuntime,
+  events: NormalizedEvent[],
+): void {
+  const runDir = ctx.options.runDir;
+  if (runDir === undefined || rt.sessionId === undefined) return;
+  const agentType = resolveAgentType(node);
+  const profileRef = node.kind === "node" ? node.profileRef : undefined;
+  const resolved = profileRef
+    ? resolveProfileSync(profileRef, ctx.options.profiles ?? {})
+    : undefined;
+  const durationMs =
+    rt.startedAt !== undefined && rt.endedAt !== undefined ? rt.endedAt - rt.startedAt : 0;
+  const session: PersistedSession = {
+    sessionId: rt.sessionId,
+    nodeId: node.id,
+    agentType,
+    profile: profileRef,
+    provider: resolved?.profile.provider,
+    model: resolved?.profile.model,
+    messages: events,
+    finalText: rt.finalText,
+    toolCallCount: rt.toolCount,
+    durationMs,
+    costUsd: rt.costUsd,
+    error: rt.error,
+  };
+  try {
+    writeSession(runDir, session);
+  } catch (err) {
+    console.warn(`[wisp] failed to persist session for node "${node.id}"`, err);
   }
 }
