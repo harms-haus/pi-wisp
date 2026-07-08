@@ -31,7 +31,7 @@ import {
   makeFakeAudit,
   type MakeCtxOptions,
 } from "../helpers/executor-context.js";
-import { makeRunState } from "../helpers/fixtures.js";
+import { makeRunState, fn } from "../helpers/fixtures.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -159,6 +159,43 @@ describe("executeReduceNode", () => {
     const rt = ctx.runState.nodes.get("r")!;
     expect(rt.status).toBe("completed");
     expect(rt.parsedOutput).toEqual({ merged: ["a string", 42], count: 2 });
+  });
+
+  it("invokes a pure-JS merge fn when present (no profile) and uses its return", async () => {
+    const ir = reduceIR("r", ["m1", "m2"], { m1: "m1", m2: "m2" });
+    // Attach a serialized merge fn; it gathers members via the context API.
+    const rNode = ir.nodes.find((n) => n.id === "r") as IRNode;
+    (rNode as { mergeFnRef?: unknown }).mergeFnRef = fn(
+      '(ctx) => ({ joined: String(ctx.output("m1")) + "|" + String(ctx.output("m2")) })',
+      "merge",
+    );
+    const ctx = ctxFor(ir);
+    complete(ctx, "m1", "hello");
+    complete(ctx, "m2", "world");
+
+    await executeReduceNode(ctx, ctx.nodeMap.get("r")!);
+
+    const rt = ctx.runState.nodes.get("r")!;
+    expect(rt.status).toBe("completed");
+    expect(rt.parsedOutput).toEqual({ joined: "hello|world" });
+    expect(rt.finalText).toContain('"joined": "hello|world"');
+  });
+
+  it("a merge fn that throws fails the node (captured, never rejects)", async () => {
+    const ir = reduceIR("r", ["m1"], { m1: "m1" });
+    const rNode = ir.nodes.find((n) => n.id === "r") as IRNode;
+    (rNode as { mergeFnRef?: unknown }).mergeFnRef = fn(
+      '() => { throw new Error("boom"); }',
+      "merge",
+    );
+    const ctx = ctxFor(ir);
+    complete(ctx, "m1", 1);
+
+    await executeReduceNode(ctx, ctx.nodeMap.get("r")!);
+
+    const rt = ctx.runState.nodes.get("r")!;
+    expect(rt.status).toBe("failed");
+    expect(rt.error ?? "").toMatch(/boom/);
   });
 
   it("agent-run synthesis: parses the adapter's JSON output into parsedOutput", async () => {

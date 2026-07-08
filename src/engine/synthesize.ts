@@ -290,8 +290,10 @@ function buildMergePrompt(outputs: unknown[], instructionPrompt?: string): strin
   parts.push(
     "--- End of member outputs ---",
     "",
-    "Return the merged result as a single JSON object. Do not include any",
-    "explanatory text outside the JSON object.",
+    "Return the consolidated result as a single JSON object with no text outside",
+    "the object. If the members are prose or free-form text, combine and reconcile",
+    'them into {"result": "<your consolidated text>"}. If the members are',
+    "structured objects, merge their fields into one object (later members win on conflicts).",
   );
 
   return parts.join("\n");

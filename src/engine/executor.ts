@@ -45,13 +45,13 @@ import { CONFIG_DEFAULTS, ABORT_DRAIN_TIMEOUT_MS } from "../constants.js";
 import { resolveProfileSync } from "../profiles/resolve.js";
 import { buildSuccessorsMap, buildPredecessorsMap } from "./retry.js";
 import { rehydrateFn } from "../dsl/fn-serialize.js";
-import { createNodeCtx } from "./context.js";
+import { createNodeCtx, resolveReduceFrom } from "./context.js";
 import { evaluateCond, executeLoop, type LoopDispatch } from "./loop.js";
 import { summarizeNode, computeTotals, type RunSummary } from "./events.js";
 import type { ExecutorContext } from "./executor-types.js";
 import { resolveAgentType } from "./executor-types.js";
 import { expandFanOut } from "./fanout.js";
-import { runNode, buildPrompt, failNode, depsMet } from "./run-node.js";
+import { runNode, buildPrompt, failNode, skipNode, depsMet } from "./run-node.js";
 import { executeReduceNode } from "./reduce-node.js";
 
 // ─── Public types ─────────────────────────────────────────────────
@@ -181,10 +181,30 @@ function scheduleReduceNode(
   node: IRNode & { kind: "reduce" },
   rt: NodeRuntime,
 ): boolean {
-  const allCompleted = node.from.every((memberId) => {
+  // Expand any fanOut-parent ids in `from` to their dynamic children so the
+  // gate waits for the children (not the parent, which completes the instant
+  // it expands) and so a failed/skipped child propagates to this reduce.
+  const members = resolveReduceFrom(ctx.runState, ctx.nodeMap, node.from);
+  let failedMember: string | undefined;
+  const allCompleted = members.every((memberId) => {
     const memberRt = ctx.runState.nodes.get(memberId);
+    if (memberRt && (memberRt.status === "failed" || memberRt.status === "skipped")) {
+      failedMember ??= memberId;
+    }
     return Boolean(memberRt && memberRt.status === "completed");
   });
+  // An upstream member (e.g. a fanOut child) failed/skipped → skip this reduce
+  // and propagate to its dependents, mirroring dep-edge skip propagation.
+  if (failedMember !== undefined) {
+    skipNode(
+      ctx,
+      node.id,
+      rt,
+      `upstream reduce member "${failedMember}" did not complete`,
+      "dep-failed",
+    );
+    return true;
+  }
   if (!allCompleted) return false;
 
   // Agent-run synthesis (profileRef) respects concurrency via a slot; pure-JS

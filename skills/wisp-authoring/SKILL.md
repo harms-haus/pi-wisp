@@ -36,22 +36,31 @@ When a single sequential subagent call suffices, do not use wisp.
 
 ## How a workflow runs
 
-1. You author a `.ts` file whose **default export** is a workflow built with the
-   `wf()` builder.
-2. You call `run_workflow({ path })` (or `{ script }` for inline source).
-3. wisp spawns a `tsx` subprocess that imports your script, evaluates the
-   builder, and emits a `graph.json` IR. **Your script only builds the graph —
-   it never spawns agents.**
-4. wisp validates the IR (cycles, dangling references, schema well-formedness),
-   creates a run directory under `.wisp/runs/`, and executes the DAG respecting
+1. You write the workflow source (a TypeScript snippet whose **default
+   export** is a `wf()` builder chain) and pass it **inline** to the tool:
+   `run_workflow({ script })`.
+2. wisp spawns a `tsx` subprocess that evaluates your script, runs the builder,
+   and emits a `graph.json` IR. **Your script only builds the graph — it never
+   spawns agents.**
+3. wisp validates the IR (cycles, dangling references, schema well-formedness),
+   creates a run directory under `.wisp/runs/`, **copies your script into that
+   run dir as `artifacts/workflow.ts`**, and executes the DAG respecting
    dependencies and layered concurrency pools.
-5. Each node spawns a `pi` subprocess; wisp streams its output, renders a live
+4. Each node spawns a `pi` subprocess; wisp streams its output, renders a live
    TUI widget, writes `audit.jsonl` + `run.json` + per-session files, and returns
    the synthesized result into your context.
 
+> **⚠️ Do not author workflow files in the project.** Always pass the source
+> inline via `run_workflow({ script })`. wisp persists the script into the run
+> directory (`artifacts/workflow.ts`) for every run — that is the canonical
+> place a workflow source lives, and it keeps the project tree clean. Avoid
+> `run_workflow({ path })` / creating `.ts` files under the repo unless you are
+> deliberately running a pre-existing, version-controlled workflow file.
+
 ## Module shape
 
-Every workflow is a `.ts` file with a default export:
+A workflow is a TypeScript snippet with a default export — passed inline as
+`run_workflow({ script })` (not written to a file):
 
 ```ts
 import { wf } from "pi-wisp";
@@ -557,11 +566,13 @@ wisp writes a durable on-disk record for every run. Inspect it with the built-in
 3. **Author bespoke profiles** (if needed) — write `.md` files with `write` into
    the appropriate profiles dir. One responsibility per profile; restrict tools
    to the minimum; set `thinkingLevel` appropriately.
-4. **Write the workflow `.ts`** — chain atoms/macros off `wf(name)`. Keep all
+4. **Write the workflow source** — chain atoms/macros off `wf(name)`. Keep all
    functions **pure w.r.t. `ctx`** (no closure-captured outer variables).
 5. **Add `outputSchema`** where you need structured data to flow between nodes.
 6. **Export default** the builder chain.
-7. **Run it** — `run_workflow({ path })`.
+7. **Run it** — `run_workflow({ script })` with the source passed **inline**.
+   Do not write the workflow to a file in the project; wisp persists it into the
+   run dir (`artifacts/workflow.ts`) for you.
 8. **Inspect** — read `run.json` and `audit.jsonl`; if nodes failed, fix the
    cause and `run_workflow({ resumeFrom })`.
 

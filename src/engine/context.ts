@@ -8,7 +8,7 @@
  * `dependsOn: ['review']`.
  */
 
-import type { NodeCtx, NodeRuntime, RunState } from "../types.js";
+import type { IRNode, NodeCtx, NodeRuntime, RunState } from "../types.js";
 
 /** Extract a node's output: parsed outputSchema result, else raw final text. */
 function nodeOutput(rt: NodeRuntime): unknown {
@@ -31,6 +31,65 @@ function collectFanOutChildren(runState: RunState, parentId: string): unknown[] 
     index++;
   }
   return results;
+}
+
+/**
+ * The child ids a fanOut parent has expanded into (`<parent>-0`, `<parent>-1`, …),
+ * in index order. Returns `[]` when the parent has not yet expanded (no
+ * children present in the run state).
+ */
+function fanOutChildIds(runState: RunState, parentId: string): string[] {
+  const ids: string[] = [];
+  let index = 0;
+  for (;;) {
+    const childId = `${parentId}-${index}`;
+    if (!runState.nodes.has(childId)) break;
+    ids.push(childId);
+    index++;
+  }
+  return ids;
+}
+
+/**
+ * Resolve a reduce node's `from` list by expanding any fanOut-parent ids into
+ * their dynamic child ids.
+ *
+ * A reduce authored as `.reduce(id, { from: ["fix"], profile })` where `"fix"`
+ * is a {@link IRNodeKind fanOut} parent must wait for — and merge — that
+ * fanOut's *children* (`fix-0`, `fix-1`, …), not the parent itself (whose own
+ * output is empty and which is marked completed the instant it expands, before
+ * its children run). Non-fanOut ids are passed through unchanged.
+ *
+ * When a fanOut parent has not yet expanded (no children discovered), the
+ * parent id is kept so the caller's completion gate keeps treating it as
+ * pending until expansion produces children.
+ *
+ * @param runState - Run state used to enumerate expanded children.
+ * @param nodeMap  - Node map used to detect fanOut parents by kind.
+ * @param from     - The reduce node's authored `from` list.
+ * @returns The effective member-id list (fanOut parents expanded to children).
+ */
+export function resolveReduceFrom(
+  runState: RunState,
+  nodeMap: Map<string, IRNode>,
+  from: readonly string[],
+): string[] {
+  const resolved: string[] = [];
+  for (const id of from) {
+    const node = nodeMap.get(id);
+    if (node?.kind === "fanOut") {
+      const childIds = fanOutChildIds(runState, id);
+      if (childIds.length > 0) {
+        resolved.push(...childIds);
+      } else {
+        // Not yet expanded: keep the parent so the gate keeps waiting.
+        resolved.push(id);
+      }
+    } else {
+      resolved.push(id);
+    }
+  }
+  return resolved;
 }
 
 /**

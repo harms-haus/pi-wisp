@@ -116,6 +116,45 @@ export function failNode(
   ctx.notify();
 }
 
+/**
+ * Skip a node and propagate skip to its transitive dependents.
+ *
+ * Like {@link failNode} but marks `nodeId` itself as `skipped` (it never ran)
+ * rather than `failed`. Used when a node cannot run because an upstream member
+ * it depends on indirectly (e.g. a fanOut child feeding a reduce) failed or was
+ * skipped — mirroring the `skipped` status a direct dep edge would produce via
+ * {@link propagateSkip}. Completed dependents are left untouched.
+ */
+export function skipNode(
+  ctx: ExecutorContext,
+  nodeId: string,
+  rt: NodeRuntime,
+  message: string,
+  reason: SkipReason = "dep-failed",
+): void {
+  rt.error = message;
+  rt.status = "skipped";
+  rt.endedAt = Date.now();
+  const audit = ctx.audit;
+  const queue: string[] = [...(ctx.successors.get(nodeId) ?? [])];
+  const visited = new Set<string>([nodeId]);
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (current === undefined || visited.has(current)) continue;
+    visited.add(current);
+    const srt = ctx.runState.nodes.get(current);
+    if (srt) {
+      if (srt.status === "completed") continue;
+      srt.status = "skipped";
+      srt.error = reason;
+      if (audit) audit.nodeSkip(current, reason);
+    }
+    queue.push(...(ctx.successors.get(current) ?? []));
+  }
+  if (audit) audit.nodeSkip(nodeId, reason);
+  ctx.notify();
+}
+
 // ─── Slot handle ──────────────────────────────────────────────────
 
 /**

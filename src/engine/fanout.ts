@@ -90,10 +90,12 @@ export function expandFanOut(ctx: ExecutorContext, node: IRNode): void {
     items = [];
   }
 
+  const createdChildIds: string[] = [];
   for (let i = 0; i < items.length; i++) {
     const childNode = buildFanOutChild(node.id, node.eachFnRef, i, items[i]);
     if (!childNode) continue;
     ctx.nodeMap.set(childNode.id, childNode);
+    createdChildIds.push(childNode.id);
     if (!ctx.runState.nodes.has(childNode.id)) {
       ctx.runState.nodes.set(childNode.id, {
         status: "pending",
@@ -103,4 +105,34 @@ export function expandFanOut(ctx: ExecutorContext, node: IRNode): void {
       });
     }
   }
+
+  // Wire each child into the fanOut parent's downstream `dep` consumers (e.g. a
+  // reduce that lists the parent in its `from`). Without this, the parent is
+  // marked completed the instant it expands, so a consumer would be ready off
+  // the parent (racing the children), the children would be edgeless "sinks",
+  // and a failed child could not propagate skip to the consumer. Giving each
+  // child a `dep` edge to every consumer makes dependency gating, skip
+  // propagation, and DAG-sink selection all behave as if the consumer depended
+  // on the children directly.
+  if (createdChildIds.length > 0) {
+    const consumers = ctx.ir.edges
+      .filter((e) => e.from === node.id && e.kind === "dep")
+      .map((e) => e.to);
+    for (const consumer of consumers) {
+      for (const childId of createdChildIds) {
+        addAdjacency(ctx.successors, childId, consumer);
+        addAdjacency(ctx.predecessors, consumer, childId);
+      }
+    }
+  }
+}
+
+/** Idempotently record a directed adjacency (`from` → `to`) in a map. */
+function addAdjacency(map: Map<string, string[]>, from: string, to: string): void {
+  let list = map.get(from);
+  if (!list) {
+    list = [];
+    map.set(from, list);
+  }
+  if (!list.includes(to)) list.push(to);
 }
