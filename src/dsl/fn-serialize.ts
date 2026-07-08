@@ -24,8 +24,9 @@ import type { FnDescriptor, FnKind, NodeCtx } from "../types.js";
  * agent authored the DSL code and the restriction enforces the "pure w.r.t.
  * ctx" contract.
  *
- * Source list of globals we intend to shadow; reserved keywords (e.g. `import`)
- * are filtered at rehydration (see {@link SHADOWABLE_PARAMS}).
+ * Source list of globals we intend to shadow. Every entry must be a legal
+ * `new Function` parameter name; reserved keywords are filtered out at
+ * rehydration as a safety net (see {@link SHADOWABLE_PARAMS}).
  */
 export const SHADOWED_GLOBALS: readonly string[] = [
   "require",
@@ -40,7 +41,6 @@ export const SHADOWED_GLOBALS: readonly string[] = [
   "clearInterval",
   "__dirname",
   "__filename",
-  "import",
   "URL",
 ];
 
@@ -48,8 +48,8 @@ export const SHADOWED_GLOBALS: readonly string[] = [
  * Reserved ECMAScript keywords that are **not** legal `new Function` parameter
  * names (they raise a `SyntaxError` at construction). This is the standard ES
  * reserved-word set plus the strict-mode reserved names `eval` and
- * `arguments`. Only `import` from {@link SHADOWED_GLOBALS} is affected today;
- * the full set is retained so any future addition is handled safely instead of
+ * `arguments`. No current {@link SHADOWED_GLOBALS} entry is reserved; the full
+ * set is retained so any future addition is handled safely instead of
  * silently breaking rehydration.
  */
 const RESERVED_KEYWORDS: ReadonlySet<string> = new Set([

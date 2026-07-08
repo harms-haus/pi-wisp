@@ -24,12 +24,12 @@ import { kebabCase } from "../utils.js";
 import { serializeFn } from "./fn-serialize.js";
 import { live } from "./ir.js";
 import type { BuilderIR, BuilderNode } from "./ir.js";
-import { materializeNode, expandReviewLoop, expandCouncil, expandReviewFix } from "./macros.js";
+import { expandReviewLoop, expandCouncil, expandReviewFix, materializeNode } from "./macros.js";
 import type {
-  MacroExpansion,
   ReviewLoopOptions,
   CouncilOptions,
   ReviewFixOptions,
+  MacroExpansion,
 } from "./macros.js";
 
 // ─── WfOptions ────────────────────────────────────────────────────
@@ -129,26 +129,26 @@ export interface WorkflowBuilder {
    */
   sequence(id: string, opts: { steps: (string | NodeSpec)[] }): WorkflowBuilder;
 
-  // ── Composite macros ────────────────────────────────────────
+  // ── Composite macros ─────────────────────────────────────────
 
   /**
-   * Add a review-loop composite: worker → gate → loop until accept.
-   * @param id   Base id for the loop node (expands to `${id}:worker`, `${id}:gate`, etc.).
-   * @param opts Worker, gate, maxRounds, optional acceptOn predicate.
+   * Review-loop macro: worker does the task, gate reviews it, and the loop
+   * repeats until `acceptOn` returns `true` or `maxRounds` is reached.
+   * The worker receives transcript-replay for continuity across rounds.
+   * Expands to a loop node + worker + gate nodes + condition.
    */
   reviewLoop(id: string, opts: ReviewLoopOptions): WorkflowBuilder;
 
   /**
-   * Add a council composite: parallel members → synthesize.
-   * @param id   Base id for the council grouping.
-   * @param opts Members + synthesizer spec.
+   * Council macro: multiple members run concurrently; a synthesizer merges
+   * their outputs into a single result. Expands to parallel + reduce.
    */
   council(id: string, opts: CouncilOptions): WorkflowBuilder;
 
   /**
-   * Add a review-fix composite: reviewer → fanOut(workers) → optional merge.
-   * @param id   Base id for the reviewFix grouping.
-   * @param opts Reviewer, workers fn, optional merge spec.
+   * Review-fix macro: a reviewer identifies problems, one worker is spawned
+   * per problem via fanOut, and results are optionally merged.
+   * Expands to reviewer → fanOut(workers) → merge?.
    */
   reviewFix(id: string, opts: ReviewFixOptions): WorkflowBuilder;
 
@@ -508,41 +508,87 @@ class WorkflowBuilderImpl implements WorkflowBuilder {
     return this;
   }
 
-  /** Splice a MacroExpansion into the builder state. Nodes whose ids are
-   *  already registered (external references) are verified to exist but not
-   *  re-added; all other nodes are registered as new. */
-  private spliceExpansion(expansion: MacroExpansion, context: string, macroId: string): void {
-    for (const n of expansion.nodes) {
-      if (this.knownIds.has(n.id)) {
-        this.assertNodeExists(n.id, context, macroId);
-      } else {
-        this.assertUniqueId(n.id);
-        this.addNode(n);
+  // ── Composite macro methods ─────────────────────────────────
+
+  /**
+   * Splice a {@link MacroExpansion} (nodes + edges + conditions) from a macro
+   * expander into the builder's internal IR. Handles id-uniqueness, reference
+   * validation, and existing-node marker skipping (when a macro option is a
+   * string referencing a previously-defined node).
+   *
+   * For marker nodes that reference an already-registered node id, the marker's
+   * {@link PrimitiveMeta} is applied to the existing node so stage-label
+   * derivation and the `primitives` record reflect the macro provenance.
+   */
+  private spliceExpansion(expansion: MacroExpansion): this {
+    const existingIds = new Set(this.knownIds);
+    const newIds = new Set<string>();
+
+    for (const node of expansion.nodes) {
+      if (existingIds.has(node.id)) continue; // marker ref to existing node
+      if (newIds.has(node.id)) {
+        throw new Error(
+          `Duplicate node id "${node.id}" within macro expansion (appears more than once).`,
+        );
+      }
+      newIds.add(node.id);
+    }
+
+    // Validate every edge references a known or newly-added node.
+    const allIds = new Set([...existingIds, ...newIds]);
+    for (const edge of expansion.edges) {
+      if (!allIds.has(edge.from)) {
+        throw new Error(
+          `Macro expansion edge references unknown node "${edge.from}" (not found in graph).`,
+        );
+      }
+      if (!allIds.has(edge.to)) {
+        throw new Error(
+          `Macro expansion edge references unknown node "${edge.to}" (not found in graph).`,
+        );
       }
     }
-    for (const e of expansion.edges) this.state.edges.push(e);
-    for (const c of expansion.conditions) this.state.conditions.push(c);
+
+    // Apply primitive metadata from marker nodes onto existing nodes.
+    for (const node of expansion.nodes) {
+      if (existingIds.has(node.id) && node.primitive) {
+        const existingNode = this.state.nodes.find((n) => n.id === node.id);
+        if (existingNode) {
+          existingNode.primitive = node.primitive;
+        }
+      }
+    }
+
+    // Add new nodes.
+    for (const node of expansion.nodes) {
+      if (!existingIds.has(node.id)) {
+        this.addNode(node);
+      }
+    }
+
+    // Append edges and conditions.
+    this.state.edges.push(...expansion.edges);
+    this.state.conditions.push(...expansion.conditions);
+
+    return this;
   }
 
   reviewLoop(id: string, opts: ReviewLoopOptions): WorkflowBuilder {
     this.assertUniqueId(id);
     const expansion = expandReviewLoop(id, opts);
-    this.spliceExpansion(expansion, "reviewLoop", id);
-    return this;
+    return this.spliceExpansion(expansion);
   }
 
   council(id: string, opts: CouncilOptions): WorkflowBuilder {
     this.assertUniqueId(id);
     const expansion = expandCouncil(id, opts);
-    this.spliceExpansion(expansion, "council", id);
-    return this;
+    return this.spliceExpansion(expansion);
   }
 
   reviewFix(id: string, opts: ReviewFixOptions): WorkflowBuilder {
     this.assertUniqueId(id);
     const expansion = expandReviewFix(id, opts);
-    this.spliceExpansion(expansion, "reviewFix", id);
-    return this;
+    return this.spliceExpansion(expansion);
   }
 
   profile(name: string, config: Record<string, unknown>): WorkflowBuilder {

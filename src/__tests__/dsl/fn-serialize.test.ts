@@ -187,15 +187,15 @@ describe("SHADOWABLE_PARAMS", () => {
   // filter relationship is verified behaviorally / by cross-check rather than
   // by re-stating the internal set verbatim.
 
-  it("is a strict subset of SHADOWED_GLOBALS (the filter drops reserved keywords)", () => {
+  it("is a subset of SHADOWED_GLOBALS (reserved keywords are excluded from the source list)", () => {
     // Every shadowable param must originate from the source global list —
     // nothing foreign is injected by the filter.
     expect(SHADOWABLE_PARAMS.every((p) => SHADOWED_GLOBALS.includes(p))).toBe(true);
-    // The filter must actually *remove* reserved keywords that appear in the
-    // source list. `import` is a reserved keyword (illegal as a `new Function`
-    // parameter name) and IS present in SHADOWED_GLOBALS, so it must be the
-    // one element excluded — proving the filter relationship works.
-    expect(SHADOWED_GLOBALS).toContain("import");
+    // SHADOWED_GLOBALS only ever holds legal `new Function` parameter names.
+    // A reserved keyword like `import` (illegal as a parameter name) is kept
+    // out of the source list rather than added and then filtered out — it
+    // could never be shadowed, so it would be dead weight.
+    expect(SHADOWED_GLOBALS).not.toContain("import");
     expect(SHADOWABLE_PARAMS).not.toContain("import");
   });
 

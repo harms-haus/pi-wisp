@@ -35,7 +35,7 @@ export default tseslint.config(
 
       "max-depth": ["error", 5],
       "max-lines-per-function": ["error", { max: 100, skipBlankLines: true, skipComments: true }],
-      "complexity": ["error", 15],
+      complexity: ["error", 15],
 
       "@typescript-eslint/no-unsafe-argument": "error",
       "@typescript-eslint/no-unsafe-assignment": "error",
