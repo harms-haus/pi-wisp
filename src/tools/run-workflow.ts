@@ -52,8 +52,6 @@ export const RunWorkflowParams = Type.Object(
   },
 );
 
-export type RunWorkflowParamsType = typeof RunWorkflowParams;
-
 // ─── Default adapter ─────────────────────────────────────────────
 
 /**

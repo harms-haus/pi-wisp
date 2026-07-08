@@ -42,8 +42,6 @@ export const ListProfilesParams = Type.Object(
   { description: "List available agent profiles across run/project/global/inline scopes." },
 );
 
-export type ListProfilesParamsType = typeof ListProfilesParams;
-
 // ─── Profile entry shape ──────────────────────────────────────────
 
 /** A single profile entry returned in the tool result. */
