@@ -277,8 +277,9 @@ describe("compileWorkflow", () => {
 
     // ── (a) SUBPATH import rewrite ────────────────────────────────────
     //
-    // Subpath imports like "pi-wisp/macros" must also be rewritten to the
-    // builder file:// URL (not left as bare specifier).
+    // The regex (`pi-wisp[^"'`\n]*`) matches the package name and any
+    // subpath that follows (e.g. "pi-wisp/macros"), replacing the entire
+    // specifier with the builder file:// URL.
 
     it('rewrites subpath imports: `from "pi-wisp/macros"` → builder URL', () => {
       const source = `import { x } from "pi-wisp/macros";\nexport default wf("test");`;
@@ -316,12 +317,13 @@ describe("compileWorkflow", () => {
       expect(rewritten).toContain('from "' + fileUrl + '"');
 
       // The comment (containing bare pi-wisp without surrounding quotes) is
-      // preserved — this part already works because replaceAll only matches
-      // the quoted form.
+      // preserved — the regex anchors on import/dynamic-import positions,
+      // so bare `pi-wisp` in comments is never matched.
       expect(rewritten).toContain("// see pi-wisp docs for more details");
 
-      // The string literal MUST stay unchanged (this is the bug: the naive
-      // replaceAll also replaces this occurrence).
+      // The string literal MUST stay unchanged — the regex only rewrites
+      // specifiers after `from` / `import(`, so `pi-wisp` in a variable
+      // assignment is left untouched.
       expect(rewritten).toContain('const pkg = "pi-wisp"');
     });
   });
