@@ -12,8 +12,11 @@
 
 import { describe, it, expect } from "vitest";
 
-import { compileWorkflow, rewriteImport } from "../../dsl/compile.js";
+import { compileWorkflow } from "../../dsl/compile.js";
 import type { CompileInput } from "../../dsl/compile.js";
+// rewriteImport was extracted into its own focused module (import-rewrite.ts)
+// during the compile.ts decomposition; source it from its new canonical home.
+import { rewriteImport } from "../../dsl/import-rewrite.js";
 import type { GraphIR } from "../../types.js";
 
 // ─── Fixture paths ─────────────────────────────────────────────────

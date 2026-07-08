@@ -3,21 +3,27 @@
 //
 // Orchestrates the Layer-1 compile step:
 //   1. Read the user's workflow source (from `scriptPath` or `scriptSource`).
-//   2. Rewrite `from "pi-wisp"` → `from "<file:// builderPath>"` (the tsx
-//      subprocess cannot resolve the package by name; see WEB_RESEARCH §2a).
+//   2. Rewrite `from "pi-wisp"` → `from "<file:// builderPath>"` via
+//      {@link rewriteImport} (the tsx subprocess cannot resolve the package by
+//      name; see WEB_RESEARCH §2a).
 //   3. Write the rewritten source to a temp `.ts` in the script's directory
 //      (preserves relative imports).
-//   4. Spawn `node --import tsx --no-warnings <harnessPath> <tempScript>`.
+//   4. Spawn `node --import tsx --no-warnings <harnessPath> <tempScript>`
+//      via {@link runSubprocess}.
 //   5. Capture stdout (the IR JSON) + stderr + exit code.
-//   6. Classify failures into structured {@link WispError}s.
+//   6. Classify failures into structured {@link WispError}s via
+//      {@link classifyStderr}.
 //   7. On success, parse stdout → {@link GraphIR} and run `validateIR` (S13).
+//
+// The import-specifier rewriter, the stderr→structured-error classifier, and
+// the subprocess runner live in their own focused modules (import-rewrite.ts,
+// error-classify.ts, subprocess.ts); this module wires them into the compile
+// pipeline.
 //
 // Exports:
 //   compileWorkflow(input) — the main compile entrypoint
-//   rewriteImport(source)  — the import specifier rewriter (testable in isolation)
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,6 +31,10 @@ import { dirname, isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { GraphIR, WispError } from "../types.js";
+import { classifyStderr, genericFallback } from "./error-classify.js";
+import { rewriteImport } from "./import-rewrite.js";
+import { runSubprocess } from "./subprocess.js";
+import type { SubprocessResult } from "./subprocess.js";
 import { validateIR } from "./validate.js";
 
 // ─── Input shape ───────────────────────────────────────────────────
@@ -46,262 +56,6 @@ export type CompileResult = { ir: GraphIR } | { error: WispError };
 
 /** Hard cap on a single compile subprocess (matches PLAN S16 / WEB §2a). */
 const COMPILE_TIMEOUT_MS = 30_000;
-
-// ─── Import-rewrite helper ─────────────────────────────────────────
-
-/**
- * Rewrite `from "pi-wisp"` (and all variants) to a `file://` URL pointing at
- * the shipped builder.
- *
- * The tsx subprocess runs the user's workflow script under the user's project
- * cwd, where `pi-wisp` is NOT resolvable as a package (it is a sibling
- * extension, not an installed dependency). `NODE_PATH` does not work for ESM
- * and editing the user's tsconfig `paths` is not viable, so the most robust
- * fix is to rewrite the bare specifier in-place to an absolute `file://` URL
- * of the shipped builder module (whose absolute path is known at extension
- * registration time; see `src/index.ts`).
- *
- * Handles both quote styles and all four import forms:
- *   default import:    `import wf from "pi-wisp"`
- *   named import:      `import { wf } from "pi-wisp"`
- *   namespace import:  `import * as wisp from "pi-wisp"`
- *   dynamic import:    `import("pi-wisp")`
- *
- * The rewriter anchors on REAL import positions only — a `from <quote>` or
- * `import(<quote>` immediately followed by the `pi-wisp` specifier — so
- * `pi-wisp` appearing inside comments or a non-import string literal (e.g.
- * `const pkg = "pi-wisp"`) is NEVER touched. Subpath specifiers
- * (`pi-wisp/macros`, `pi-wisp/sub`) are likewise rewritten wholesale to
- * `builderUrl`: the shipped builder resolves the entire module regardless of
- * the requested subpath. The matched specifier (including any subpath) is
- * replaced with `builderUrl`, preserving the original quote style and the
- * surrounding `from` / `import(` / `)` syntax. When the source contains no
- * `pi-wisp` import it is returned unchanged.
- *
- * @param source     - The raw workflow script source text.
- * @param builderUrl - The absolute `file://` URL of the shipped builder.ts
- *                     (e.g. `pathToFileURL(builderPath).href`).
- * @returns The source with every `pi-wisp` specifier rewritten.
- */
-export function rewriteImport(source: string, builderUrl: string): string {
-  // Anchor on REAL import positions so `pi-wisp` inside comments or a
-  // non-import string literal is never rewritten. Two forms:
-  //   static  — `from <quote>pi-wisp[/sub]<quote>`
-  //   dynamic — `import(<quote>pi-wisp[/sub]<quote>)`
-  // The opening quote is captured (group 2) and back-referenced so the closing
-  // quote matches; the `from\s*` / `import(\s*` prefix (group 1) and the
-  // dynamic `\s*)` suffix (group 3) are captured and re-emitted to preserve
-  // surrounding whitespace exactly. A subpath (`pi-wisp/macros`) is part of the
-  // matched specifier and is replaced wholesale with `builderUrl`.
-  const staticRe = /(from\s*)(["'`])pi-wisp[^"'`\n]*\2/g;
-  const dynamicRe = /(import\s*\(\s*)(["'`])pi-wisp[^"'`\n]*\2(\s*\))/g;
-  return source
-    .replace(
-      staticRe,
-      (_match, prefix: string, quote: string) => `${prefix}${quote}${builderUrl}${quote}`,
-    )
-    .replace(
-      dynamicRe,
-      (_match, prefix: string, quote: string, suffix: string) =>
-        `${prefix}${quote}${builderUrl}${quote}${suffix}`,
-    );
-}
-
-// ─── Error classification ──────────────────────────────────────────
-
-interface Classified {
-  kind: "compile" | "runtime";
-  message: string;
-  location?: string;
-}
-
-/**
- * Extract a location string (`<file>:<line>:<col>`) from a regex match that
- * captured the three components in groups 1–3, or `undefined` when any group
- * is absent.
- */
-function locationFromMatch(match: RegExpMatchArray | null): string | undefined {
-  if (match && match[1] && match[2] && match[3]) {
-    return `${match[1]}:${match[2]}:${match[3]}`;
-  }
-  return undefined;
-}
-
-/**
- * (1) esbuild transform error: a line of the form
- * `<path>:<line>:<col>: ERROR: <message>`. Returns `undefined` when stderr
- * carries no such line.
- */
-function matchEsbuildError(stderr: string): Classified | undefined {
-  const esbuildLine = stderr.split("\n").find((line) => /:\d+:\d+:\s*ERROR:/.test(line));
-  if (esbuildLine === undefined) return undefined;
-  const match = esbuildLine.match(/^(.+?):(\d+):(\d+):\s*ERROR:\s*(.+)$/);
-  if (match && match[1] && match[2] && match[3] && match[4]) {
-    return {
-      kind: "compile",
-      message: match[4],
-      location: `${match[1]}:${match[2]}:${match[3]}`,
-    };
-  }
-  return { kind: "compile", message: esbuildLine };
-}
-
-/**
- * (2) Other recognised compile markers (`Transform failed with N error`,
- * `✘ [ERROR]`, `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`, `error TSxxxx`). Returns
- * `undefined` when none are present.
- */
-function matchCompileMarker(stderr: string): Classified | undefined {
-  const markerRe =
-    /Transform failed with \d+ error|✘\s*\[ERROR\]|ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX|\berror TS\d+/i;
-  // Use the FIRST diagnostic line carrying a recognised compile marker as the
-  // message (instead of a generic 'Failed to compile the workflow script.') and
-  // scope the location search to that same line, so an unrelated file:line:col
-  // elsewhere in stderr is not surfaced.
-  const markerLine = stderr.split("\n").find((line) => markerRe.test(line));
-  if (markerLine === undefined) return undefined;
-  const location = locationFromMatch(markerLine.match(/^(.+?):(\d+):(\d+)/));
-  return {
-    kind: "compile",
-    message: markerLine.trim(),
-    ...(location !== undefined ? { location } : {}),
-  };
-}
-
-/**
- * (3) Runtime exception: a line `<ErrorType>: <message>` (e.g. `Error: …`,
- * `TypeError: …`, `ReferenceError: …`). The bare words `Error` and `Exception`
- * are matched explicitly — a plain `throw new Error(...)` surfaces as
- * `Error: <msg>`, which the prefixed `[A-Z]\w*(?:Error|Exception)` branch alone
- * would miss. Returns `undefined` when no such line is present.
- */
-function matchRuntimeError(stderr: string): Classified | undefined {
-  const runtimeMatch = stderr.match(/^\s*([A-Z]\w*(?:Error|Exception)|Error|Exception):\s*(.+)$/m);
-  if (!runtimeMatch) return undefined;
-  const messagePart = runtimeMatch[2] ?? "Runtime error during module evaluation.";
-  const stackLoc = stderr.match(/at [^\n]*\((.+?):(\d+):(\d+)\)/);
-  return {
-    kind: "runtime",
-    message: messagePart,
-    ...(locationFromMatch(stackLoc) ? { location: locationFromMatch(stackLoc) } : {}),
-  };
-}
-
-/** (4) Generic fallback for unrecognised / empty stderr. */
-function genericFallback(stderr: string, exitCode: number | null): Classified {
-  const firstLine = stderr.trim().split("\n")[0];
-  if (firstLine) {
-    return { kind: "compile", message: `Workflow script execution failed: ${firstLine}` };
-  }
-  return {
-    kind: "compile",
-    message: `Workflow script exited with code ${exitCode ?? "null"} and produced no diagnostic output.`,
-  };
-}
-
-/**
- * Classify captured subprocess stderr into a structured compile/runtime error.
- *
- * Heuristics are checked in order (WEB_RESEARCH §2a): esbuild transform errors
- * first (1), then other compile markers (2), then runtime exceptions (3), then
- * a generic fallback (4). esbuild markers precede runtime markers because a
- * syntax error surfaces as an `Error: Transform failed …` wrapper that would
- * otherwise match the runtime `<ErrorType>: <message>` pattern.
- */
-function classifyStderr(stderr: string, exitCode: number | null): Classified {
-  return (
-    matchEsbuildError(stderr) ??
-    matchCompileMarker(stderr) ??
-    matchRuntimeError(stderr) ??
-    genericFallback(stderr, exitCode)
-  );
-}
-
-// ─── Subprocess runner ─────────────────────────────────────────────
-
-interface SubprocessResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-  timedOut: boolean;
-}
-
-/**
- * Spawn a node subprocess, accumulate stdout/stderr, and resolve on close with
- * the captured buffers + exit code + a timeout flag.
- *
- * A {@link COMPILE_TIMEOUT_MS} guard aborts the child via the spawn `signal`
- * option (Node 22 kills the direct child on abort); the resulting close/error
- * event is resolved with `timedOut: true`.
- */
-function runSubprocess(
-  command: string,
-  args: string[],
-  timeoutMs: number,
-): Promise<SubprocessResult> {
-  return new Promise((resolve) => {
-    const ac = new AbortController();
-    // `const`: the timer is set once and cleared from `finish`. `finish` is
-    // only ever invoked from async callbacks that fire after this synchronous
-    // body completes, so the const is always initialised before use.
-    const timer = setTimeout(() => {
-      ac.abort();
-    }, timeoutMs);
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-
-    const finish = (result: SubprocessResult): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(result);
-    };
-
-    let proc: ReturnType<typeof spawn>;
-    try {
-      proc = spawn(command, args, {
-        // A compile subprocess must NOT outlive the host: keep it in the
-        // parent's process group (no `detached: true`) so it is reaped with
-        // the extension host; the AbortSignal below still enforces the timeout.
-        stdio: ["pipe", "pipe", "pipe"],
-        signal: ac.signal,
-      });
-    } catch (error) {
-      finish({
-        stdout,
-        stderr: `${stderr}${stderr ? "\n" : ""}spawn failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-        exitCode: null,
-        timedOut: false,
-      });
-      return;
-    }
-
-    proc.stdout?.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString("utf8");
-    });
-    proc.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
-    });
-
-    proc.on("error", (err: Error) => {
-      // On abort the signal emits an AbortError here; otherwise it's a spawn
-      // failure (e.g. ENOENT).
-      finish({
-        stdout,
-        stderr: ac.signal.aborted ? stderr : `${stderr}${stderr ? "\n" : ""}${err.message}`,
-        exitCode: null,
-        timedOut: ac.signal.aborted,
-      });
-    });
-
-    proc.on("close", (code: number | null) => {
-      finish({ stdout, stderr, exitCode: code, timedOut: ac.signal.aborted });
-    });
-  });
-}
 
 // ─── Input + source helpers ────────────────────────────────────────
 
