@@ -854,6 +854,78 @@ describe("killProcessTree", () => {
     await advanceTime(20000);
     await promise;
   });
+
+  // ── Listener leak fix (exit/close listeners must be detached) ──
+
+  it("removes exit/close listeners after finish() runs via early process exit", async () => {
+    // Use an EventEmitter-backed mock so killProcessTree attaches listeners.
+    const proc = createMockProcess();
+    proc.pid = 4242;
+
+    const promise = killProcessTree(proc, { sigtermGraceMs: 5000, forceResolveMs: 5000 });
+
+    // While the process is alive, killProcessTree attaches one exit and one
+    // close listener so it can resolve early.
+    expect(proc.listenerCount("exit")).toBe(1);
+    expect(proc.listenerCount("close")).toBe(1);
+
+    // Process dies on SIGTERM → finish() runs synchronously inside the listener.
+    proc.emit("exit", 0);
+
+    await promise;
+
+    // finish() MUST detach the exit/close listeners so a process that lingers
+    // in a D-state (uninterruptible sleep) cannot keep them attached forever.
+    expect(proc.listenerCount("exit")).toBe(0);
+    expect(proc.listenerCount("close")).toBe(0);
+  });
+
+  it("removes exit/close listeners after the force-resolve timer fires (D-state path)", async () => {
+    const proc = createMockProcess();
+    proc.pid = 4343;
+
+    const promise = killProcessTree(proc, { sigtermGraceMs: 5000, forceResolveMs: 5000 });
+
+    expect(proc.listenerCount("exit")).toBe(1);
+    expect(proc.listenerCount("close")).toBe(1);
+
+    // The process never emits exit/close (D-state) — the force-resolve guard
+    // fires after sigtermGraceMs + forceResolveMs.
+    await advanceTime(11000);
+    await promise;
+
+    // Listeners must be cleaned up even on the force-resolve path.
+    expect(proc.listenerCount("exit")).toBe(0);
+    expect(proc.listenerCount("close")).toBe(0);
+  });
+
+  // ── Silent treeKill failure fix (must not reject; must be observable) ──
+
+  it("does not reject when treeKill throws (logs the failure via console.warn)", async () => {
+    const proc = createMockProcess();
+    proc.pid = 4444;
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // Every treeKill invocation (SIGTERM at setup, SIGKILL on the escalation
+    // timer) throws — e.g. EPERM on a process we don't own.
+    mockTreeKill.mockImplementation(() => {
+      throw new Error("tree-kill EPERM");
+    });
+
+    const promise = killProcessTree(proc, { sigtermGraceMs: 5000, forceResolveMs: 5000 });
+
+    // Advance through SIGTERM, SIGKILL, and force-resolve windows.
+    await advanceTime(11000);
+
+    // killProcessTree must NEVER reject, even when treeKill throws.
+    await expect(promise).resolves.toBeUndefined();
+
+    // The failure must be observable (logged) rather than silently swallowed.
+    expect(warnSpy).toHaveBeenCalled();
+
+    warnSpy.mockRestore();
+  });
 });
 
 // ─── runAgent: spawn errors ───────────────────────────────────────
