@@ -1,17 +1,21 @@
-/* eslint-disable max-lines-per-function, complexity, max-depth */
-
 /**
- * DAG executor core — RISK step (S26 / kb-14).
+ * DAG executor core — orchestrator (RISK step / kb-14).
  *
  * Executes a compiled GraphIR against the provided RunState, orchestrating
  * per-node adapter invocations, concurrency-pool scheduling (AND semantics),
  * lazy fanOut expansion at ready-time, output-schema post-hoc validation,
  * retry/skip propagation (no fail-fast), and RunSummary generation.
  *
+ * The per-node lifecycle, fanOut expansion, and reduce/synthesis logic live in
+ * companion modules (`run-node.ts`, `fanout.ts`, `reduce-node.ts`) and share
+ * mutable state via an {@link ExecutorContext} bundle (defined in
+ * `executor-types.ts`). This file owns only the orchestration: building the
+ * context, the main scheduling loop, and the RunSummary.
+ *
  * The executor is adapter-agnostic: it checks for the FakeAgentAdapter
  * duck-typing signal (`adapter.emitEvents`) and calls it directly when present
- * (no subprocess), otherwise falls back to the child-process spawner
- * ({@link runAgent}) with the adapter's `parseEventStreamLine`.
+ * (no subprocess), otherwise falls back to the child-process spawner via
+ * `invokeAdapter`.
  *
  * ### Concurrency model
  * Independent ready nodes whose scheduler pools have capacity are launched
@@ -19,7 +23,7 @@
  * FIRST in-flight completion via `Promise.race`, then re-evaluates readiness,
  * fanOut expansion, and schedulability. A node that cannot acquire its slots
  * remains `ready` and is retried on a subsequent pass once capacity frees. This
- * is what makes the layered concurrency pools (S28) meaningful.
+ * is what makes the layered concurrency pools meaningful.
  *
  * ### State machine
  * ```
@@ -29,57 +33,28 @@
  *                              │                          └──(exhausted)──→ failed ──→ dependents → skipped
  *                              └──(tryAcquire fails)──→ ready (waits for capacity)
  * ```
- *
- * ### References
- * - PLAN.md §7.1 (DAG executor core)
- * - PLAN.md §19 (fake adapter integration)
- * - IMPLEMENTATION_PROMPT §7.1 (node state machine)
  */
-
-import type { TSchema } from "typebox";
 
 import type { AgentAdapter } from "../adapters/types.js";
 import type { AuditLogger } from "../run/audit.js";
 import type { Scheduler, SchedulableNode } from "./scheduler.js";
-import type {
-  GraphIR,
-  IRNode,
-  NodeRuntime,
-  NodeSpec,
-  NormalizedEvent,
-  PoolUsage,
-  RunState,
-} from "../types.js";
-import { debounce } from "../utils.js";
-import { CONFIG_DEFAULTS, DEFAULT_AGENT_TYPE, ABORT_DRAIN_TIMEOUT_MS } from "../constants.js";
-import { createNodeCtx } from "./context.js";
-import {
-  resolvePolicy,
-  shouldRetry,
-  propagateSkip,
-  backoffMs,
-  buildSuccessorsMap,
-  buildPredecessorsMap,
-  type SkipReason,
-} from "./retry.js";
-import { rehydrateFn, rehydrateArity, validateOutputAgainstSchema } from "../dsl/fn-serialize.js";
-import type { RunAgentResult } from "../spawn/spawner.js";
-import { resolveProfileSync } from "../profiles/resolve.js";
+import type { GraphIR, IRNode, NodeRuntime, PoolUsage, RunState } from "../types.js";
 import type { ResolveOptions } from "../profiles/resolve.js";
+import { debounce } from "../utils.js";
+import { CONFIG_DEFAULTS, ABORT_DRAIN_TIMEOUT_MS } from "../constants.js";
+import { resolveProfileSync } from "../profiles/resolve.js";
+import { buildSuccessorsMap, buildPredecessorsMap } from "./retry.js";
+import { rehydrateFn } from "../dsl/fn-serialize.js";
+import { createNodeCtx } from "./context.js";
 import { evaluateCond, executeLoop, type LoopDispatch } from "./loop.js";
-import { executeSynthesis } from "./synthesize.js";
-import {
-  finalTextFromEvents,
-  sessionIdFromEvents,
-  toolCountFromEvents,
-  fileEditsFromEvents,
-  summarizeNode,
-  computeTotals,
-  invokeAdapter,
-  type RunSummary,
-} from "./events.js";
+import { summarizeNode, computeTotals, type RunSummary } from "./events.js";
+import type { ExecutorContext } from "./executor-types.js";
+import { resolveAgentType } from "./executor-types.js";
+import { expandFanOut } from "./fanout.js";
+import { runNode, buildPrompt, failNode, depsMet } from "./run-node.js";
+import { executeReduceNode } from "./reduce-node.js";
 
-// ─── Public types ─────────────────────────────────────────────
+// ─── Public types ─────────────────────────────────────────────────
 
 /** Options for {@link executeDAG}. */
 export interface ExecuteDAGOptions {
@@ -119,8 +94,7 @@ export interface ExecuteDAGOptions {
    * Override for the post-loop in-flight drain timeout in ms (default:
    * {@link ABORT_DRAIN_TIMEOUT_MS}). Bounds the trailing
    * `Promise.allSettled` so an adapter that ignores the abort signal and
-   * never settles cannot hang executeDAG forever. When the drain times out,
-   * a warning is logged and executeDAG returns regardless.
+   * never settles cannot hang executeDAG forever.
    */
   abortDrainTimeoutMs?: number;
 }
@@ -128,763 +102,236 @@ export interface ExecuteDAGOptions {
 /** Coalesce rapid `onUpdate` calls into a single TUI re-render. */
 const UPDATE_DEBOUNCE_MS = 50;
 
-// ─── Module-scope helpers (pure) ──────────────────────────────
-
-/** Resolve `ms` later. */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Resolve the agent type for a node (defaults to "pi"). */
-function resolveAgentType(node: IRNode): string {
-  if (node.kind === "node" || node.kind === "reduce") return node.agentType ?? DEFAULT_AGENT_TYPE;
-  return DEFAULT_AGENT_TYPE;
-}
+// ─── Scheduling-loop phase helpers ────────────────────────────────
 
 /**
- * Determine the outcome of a completed node run from its event stream.
- *
- * The last `error` event (if any) makes the run fail (with its retryability);
- * otherwise a `done` event (or any benign stream) is a success.
+ * Mark `pending` nodes whose dependencies are all `completed` as `ready`.
+ * Returns whether any node became ready this pass.
  */
-function determineOutcome(events: NormalizedEvent[]): {
-  succeeded: boolean;
-  errorMessage?: string;
-  retryable: boolean;
-} {
-  let lastError: { message: string; retryable: boolean } | undefined;
-  for (const e of events) {
-    if (e.type === "error") {
-      lastError = { message: e.message, retryable: e.retryable };
+function markReadyNodes(ctx: ExecutorContext, nodeIds: string[]): boolean {
+  let progressed = false;
+  for (const id of nodeIds) {
+    const rt = ctx.runState.nodes.get(id);
+    if (!rt || rt.status !== "pending") continue;
+    if (depsMet(ctx, id)) {
+      rt.status = "ready";
+      progressed = true;
     }
   }
-  if (lastError) {
-    return { succeeded: false, errorMessage: lastError.message, retryable: lastError.retryable };
-  }
-  return { succeeded: true, retryable: false };
+  return progressed;
 }
 
 /**
- * JSON-parse a node's final text and validate it against an output schema using
- * the canonical TypeBox post-hoc validator. Returns the parsed output on success
- * or a descriptive error string on failure. Never throws.
+ * Phase 2a: process ready structural nodes (cond / loop) BEFORE regular nodes,
+ * so cond/loop handlers claim their subgraph nodes before Phase 2b schedules
+ * them independently. Returns whether any structural node was handled.
  */
-function validateNodeOutput(
-  finalText: string | undefined,
-  schema: unknown,
-): { ok: true; parsed: unknown } | { ok: false; error: string } {
-  if (!finalText) {
-    return { ok: false, error: "Node produced no output text to validate against the schema" };
+function dispatchStructuralNodes(
+  ctx: ExecutorContext,
+  loopDispatch: LoopDispatch,
+  nodeIds: string[],
+): boolean {
+  let progressed = false;
+  for (const id of nodeIds) {
+    if (ctx.signal?.aborted) break;
+    const rt = ctx.runState.nodes.get(id);
+    if (!rt || rt.status !== "ready" || ctx.inFlight.has(id)) continue;
+    const node = ctx.nodeMap.get(id);
+    if (!node) continue;
+
+    if (node.kind === "cond") {
+      evaluateCond(node, loopDispatch);
+      progressed = true;
+      continue;
+    }
+    if (node.kind === "loop") {
+      // Launch the loop handler as an in-flight promise (like runNode).
+      const loopPromise = executeLoop(node, loopDispatch);
+      ctx.inFlight.set(id, loopPromise);
+      loopPromise
+        .finally(() => {
+          ctx.inFlight.delete(id);
+        })
+        .catch(() => {
+          // executeLoop never rejects (errors are captured into node state).
+        });
+      progressed = true;
+    }
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(finalText);
-  } catch {
-    return { ok: false, error: "Output is not valid JSON; cannot validate against the schema" };
-  }
-  const result = validateOutputAgainstSchema(parsed, schema as TSchema);
-  if (result.ok) return { ok: true, parsed };
-  return { ok: false, error: `Schema validation failed: ${result.errors.join("; ")}` };
+  return progressed;
 }
 
-/**
- * Idempotent handle to a held scheduler slot.
- *
- * `release()` decrements the slot's pools exactly once, regardless of how many
- * times it is called. This lets {@link runNode} release unconditionally from a
- * `finally` block on every exit (return, throw, abort) without tracking whether
- * the slot was already released inline. After the slot is released mid-attempt
- * (before a retry backoff) and re-acquired, a fresh handle guards the new hold.
- */
-interface SlotHandle {
-  release(): void;
-}
-
-/**
- * Wrap a slot the caller already holds in an idempotent {@link SlotHandle}.
- * No acquisition happens here — the caller must hold the slot; this only makes
- * release safe to call repeatedly (a no-op after the first call).
- */
-function slotHandle(scheduler: Scheduler, schedulable: SchedulableNode): SlotHandle {
-  let released = false;
+/** Build a schedulable descriptor (agentType / provider / model) for a node. */
+function schedulableFor(ctx: ExecutorContext, node: IRNode): SchedulableNode {
+  const profileRef = (node as { profileRef?: string }).profileRef ?? "default";
+  const resolved = resolveProfileSync(profileRef, ctx.options.profiles ?? {});
   return {
-    release(): void {
-      if (released) return;
-      released = true;
-      scheduler.release(schedulable);
-    },
+    agentType: resolveAgentType(node),
+    provider: resolved?.profile.provider,
+    model: resolved?.profile.model,
   };
 }
 
-// ─── Main entry point ────────────────────────────────────────
-
 /**
- * Execute a compiled DAG against the given run state.
- *
- * Algorithm (concurrent, scheduler-gated):
- *  1. Mark `pending` nodes whose dependencies (dep/fanOut predecessors) are all
- *     `completed` as `ready`.
- *  2. For each `ready` node: fanOut nodes expand lazily (rehydrate iterate →
- *     items → each → child IRNodes added to the live graph); other structural
- *     kinds (cond/loop/reduce/parallel/sequence) complete as placeholders
- *     (their real logic is handled by S27/S30); plain `node`s acquire scheduler
- *     slots (AND semantics) and launch concurrently.
- *  3. Await the first in-flight node completion, then re-evaluate.
- *  4. On node completion: post-hoc output-schema validation (`Value.Check`).
- *     On failure: retry (fresh session per D4) or fail + propagate skip to
- *     transitive dependents (no fail-fast — independent branches continue).
- *  5. Terminate when nothing is ready/schedulable and nothing is in flight.
- *  6. Return a RunSummary with per-node results and aggregate totals.
+ * Launch a reduce node: requires all members completed; the agent-run path
+ * (profileRef present) acquires a scheduler slot to respect concurrency limits.
  */
-export async function executeDAG(options: ExecuteDAGOptions): Promise<RunSummary> {
-  const { ir, runState, getAdapter, scheduler, signal, onUpdate, audit } = options;
+function scheduleReduceNode(
+  ctx: ExecutorContext,
+  node: IRNode & { kind: "reduce" },
+  rt: NodeRuntime,
+): boolean {
+  const allCompleted = node.from.every((memberId) => {
+    const memberRt = ctx.runState.nodes.get(memberId);
+    return Boolean(memberRt && memberRt.status === "completed");
+  });
+  if (!allCompleted) return false;
 
-  const defaultRetries = ir.options.defaultRetries ?? CONFIG_DEFAULTS.defaultRetries;
-  const retryBackoff = options.retryBackoffMs ?? CONFIG_DEFAULTS.retryBackoffMs;
-  const update = onUpdate
-    ? debounce((rs: RunState, pu: PoolUsage) => {
-        onUpdate(rs, pu);
-      }, UPDATE_DEBOUNCE_MS)
-    : undefined;
-  const notify = (): void => {
-    update?.call(runState, scheduler.usage());
-  };
-
-  /**
-   * Fail a node and propagate skip to dependents.
-   *
-   * Sets the node's runtime to failed with the given error message, then
-   * propagates `dep-failed` to all transitive dependents so they become
-   * skipped (no fail-fast — independent branches continue).
-   */
-  function failNode(
-    nodeId: string,
-    rt: NodeRuntime,
-    message: string,
-    reason: SkipReason = "dep-failed",
-  ): void {
-    rt.error = message;
-    rt.status = "failed";
-    rt.endedAt = Date.now();
-    if (audit) {
-      audit.nodeFail(nodeId, message);
-      propagateSkip(nodeId, runState, reason, successors, (skippedId, skipReason) => {
-        audit.nodeSkip(skippedId, skipReason);
-      });
-    } else {
-      propagateSkip(nodeId, runState, reason, successors);
-    }
-    notify();
+  // Agent-run synthesis (profileRef) respects concurrency via a slot; pure-JS
+  // merge (no adapter, synchronous CPU) skips it.
+  let schedulable: SchedulableNode | undefined;
+  if (node.profileRef) {
+    schedulable = schedulableFor(ctx, node);
+    if (!ctx.scheduler.tryAcquire(schedulable)) return false;
   }
 
-  // Mutable node map: seeded from the IR, extended with dynamic fanOut children.
-  const nodeMap = new Map<string, IRNode>();
-  for (const n of ir.nodes) nodeMap.set(n.id, n);
+  rt.status = "running";
+  if (rt.startedAt === undefined) rt.startedAt = Date.now();
+  const reducePromise = executeReduceNode(ctx, node)
+    .finally(() => {
+      ctx.inFlight.delete(node.id);
+      if (schedulable) ctx.scheduler.release(schedulable);
+    })
+    .catch(() => {
+      // executeReduceNode never rejects (errors captured via try/catch + failNode).
+    });
+  ctx.inFlight.set(node.id, reducePromise);
+  return true;
+}
 
-  // Pre-built adjacency maps from IR edges for O(1) predecessor/successor
-  // lookups (instead of scanning all edges each time).
-  const successors = buildSuccessorsMap(ir.edges);
-  const predecessors = buildPredecessorsMap(ir.edges);
+/** Acquire slots and launch a plain node; returns false when it must stay ready. */
+function schedulePlainNode(ctx: ExecutorContext, node: IRNode, rt: NodeRuntime): boolean {
+  const schedulable = schedulableFor(ctx, node);
+  if (!ctx.scheduler.tryAcquire(schedulable)) return false; // stays ready; retried next pass
 
-  // Override prompts for nodes whose prompt is dynamically changed (e.g.
-  // loop body nodes on transcript-replay iterations). Checked first by
-  // {@link buildPrompt}.
-  const promptOverrides = new Map<string, string>();
+  rt.status = "running";
+  if (rt.startedAt === undefined) rt.startedAt = Date.now();
+  const runPromise = runNode(ctx, node, schedulable).finally(() => {
+    ctx.inFlight.delete(node.id);
+  });
+  ctx.inFlight.set(node.id, runPromise);
+  return true;
+}
 
-  // In-flight node promises (concurrent execution). Deleted from `.finally`.
-  const inFlight = new Map<string, Promise<void>>();
+/**
+ * Phase 2b: process a single ready node — fanOut (lazy expand), reduce
+ * (synthesis), other structural kinds (placeholder completion), or a plain
+ * node (scheduler-gated launch). Returns whether the pass made progress on
+ * this node (a node that must wait returns false and is retried next pass).
+ */
+function scheduleReadyNode(ctx: ExecutorContext, id: string): boolean {
+  const rt = ctx.runState.nodes.get(id);
+  if (!rt || rt.status !== "ready" || ctx.inFlight.has(id)) return false;
+  const node = ctx.nodeMap.get(id);
+  if (!node) return false;
 
-  // ── Closure helpers (close over runState / nodeMap / ir) ──
-
-  /**
-   * True when every predecessor of `nodeId` is `completed`.
-   * Uses the pre-built reverse adjacency map for O(in-degree) lookups.
-   */
-  function depsMet(nodeId: string): boolean {
-    const predIds = predecessors.get(nodeId);
-    if (predIds) {
-      for (const pred of predIds) {
-        const rt = runState.nodes.get(pred);
-        if (!rt || rt.status !== "completed") return false;
-      }
-    }
-    // Also check explicit dependsOn (declared in the DSL node spec).
-    const node = nodeMap.get(nodeId);
-    if (node?.dependsOn) {
-      for (const dep of node.dependsOn) {
-        const rt = runState.nodes.get(dep);
-        if (!rt || rt.status !== "completed") return false;
-      }
-    }
+  // Lazy fanOut expansion at ready-time.
+  if (node.kind === "fanOut") {
+    expandFanOut(ctx, node);
+    rt.status = "completed";
+    if (rt.startedAt === undefined) rt.startedAt = Date.now();
+    rt.endedAt = Date.now();
     return true;
   }
 
-  /**
-   * Expand a fanOut node: rehydrate+invoke its iterate fn against the run state
-   * to produce an item array, then create one child IRNode per item via the
-   * each fn (applying the resulting NodeSpec — prompt, outputSchema, etc.).
-   * Children are named `<fanOutId>-<index>` and added to `nodeMap` + `runState`.
-   */
-  function expandFanOut(node: IRNode): void {
-    if (node.kind !== "fanOut") return;
-    const producerRt = runState.nodes.get(node.from);
-    if (!producerRt || producerRt.status !== "completed") return;
-
-    const ctx = createNodeCtx(runState, node.id);
-    let items: unknown[];
-    try {
-      const result = rehydrateFn(node.iterateFnRef, ctx);
-      items = Array.isArray(result) ? result : [];
-    } catch {
-      // Iterate fn threw — treat the fanOut as producing zero children.
-      items = [];
-    }
-
-    for (let i = 0; i < items.length; i++) {
-      const childId = `${node.id}-${i}`;
-      let spec: Partial<NodeSpec> | null = null;
-      try {
-        const result: unknown = rehydrateArity(node.eachFnRef, ["item"], [items[i]]);
-        if (result !== null && result !== undefined && typeof result === "object") {
-          spec = result;
-        }
-      } catch {
-        spec = null;
-      }
-      if (!spec) continue;
-
-      const childNode: IRNode = {
-        id: childId,
-        kind: "node",
-        agentType: spec.agentType,
-        profileRef: spec.profileRef ?? "default",
-        prompt: spec.prompt,
-        outputSchema: spec.outputSchema,
-        dependsOn: spec.dependsOn,
-        stage: spec.stage,
-        retries: spec.retries,
-        timeoutSec: spec.timeoutSec,
-        cwd: spec.cwd,
-        primitive: { kind: "fanOut-child", meta: { parent: node.id, index: i } },
-      };
-      nodeMap.set(childId, childNode);
-      if (!runState.nodes.has(childId)) {
-        runState.nodes.set(childId, {
-          status: "pending",
-          attempts: 0,
-          toolCount: 0,
-          filesEdited: [],
-        });
-      }
-    }
+  if (node.kind === "reduce") {
+    return scheduleReduceNode(ctx, node, rt);
   }
 
-  /** Build the final prompt for a node: static `prompt`, or rehydrated `promptFnRef`. */
-  function buildPrompt(node: IRNode): string {
-    // Check prompt override first (used by loop transcript-replay).
-    const override = promptOverrides.get(node.id);
-    if (override !== undefined) return override;
-    if (node.kind !== "node") return "";
-    if (node.promptFnRef) {
-      try {
-        const ctx = createNodeCtx(runState, node.id);
-        const result = rehydrateFn(node.promptFnRef, ctx);
-        if (typeof result === "string") return result;
-        if (result === undefined || result === null) return "";
-        return JSON.stringify(result);
-      } catch {
-        return node.prompt ?? "";
-      }
-    }
-    return node.prompt ?? "";
-  }
-
-  /**
-   * Run a single node to a terminal state (completed|failed), handling retries
-   * (fresh session each retry per D4). The scheduler slot is already held on
-   * entry for the first attempt; retries release, back off, and re-acquire.
-   * Never rejects — all errors are captured into node state.
-   */
-  async function runNode(node: IRNode, schedulable: SchedulableNode): Promise<void> {
-    const rt = runState.nodes.get(node.id);
-    if (!rt) return;
-    const policy = resolvePolicy(node, defaultRetries, retryBackoff);
-    // Idempotent handle around the slot acquired before runNode was called.
-    // `release()` is a no-op after the first call, so the finally block can
-    // release unconditionally on every exit. Re-armed (a fresh handle) after
-    // each successful retry re-acquire so the new hold is also covered.
-    let slot = slotHandle(scheduler, schedulable);
-
-    try {
-      for (;;) {
-        // Aborted before/at the start of an attempt: the finally block releases
-        // the held slot (the handle is still unreleased here).
-        if (signal?.aborted) {
-          failNode(node.id, rt, "aborted");
-          return;
-        }
-
-        rt.attempts += 1;
-        const attempt = rt.attempts;
-        const prompt = buildPrompt(node);
-        const adapter = getAdapter(resolveAgentType(node), node.id);
-
-        const events: NormalizedEvent[] = [];
-        const onEvent = (event: NormalizedEvent | null): void => {
-          if (event === null) return;
-          events.push(event);
-          // Real-time telemetry (final values reconciled from `done` below).
-          if (event.type === "session") {
-            rt.sessionId = event.id;
-          } else if (event.type === "tool_call") {
-            audit?.nodeTool(node.id, event.name);
-          }
-          notify();
-        };
-
-        let runResult: RunAgentResult | undefined;
-
-        try {
-          runResult = await invokeAdapter(adapter, {
-            prompt,
-            nodeId: node.id,
-            attempt,
-            cwd: node.cwd,
-            signal,
-            onEvent,
-            onUpdate: notify,
-            agentType: resolveAgentType(node),
-          });
-        } catch (err) {
-          // Spawn / process error → non-retryable failure. The held slot is
-          // released by the finally block (the handle is still unreleased here).
-          failNode(node.id, rt, err instanceof Error ? err.message : String(err));
-          return;
-        }
-
-        // FIX 2: Abort after run completes but before outcome evaluation → fail the node.
-        if (signal?.aborted) {
-          failNode(node.id, rt, "aborted");
-          return;
-        }
-
-        // Release the slot held for this attempt so other nodes may run while
-        // we validate / decide on a retry. The handle is idempotent, so the
-        // finally block's release becomes a no-op if we exit without retrying.
-        slot.release();
-
-        // Synthesize a `done` event when the stream lacks one (e.g. real pi
-        // output, which emits message_complete but no done).
-        if (!events.some((e) => e.type === "done")) {
-          events.push({
-            type: "done",
-            sessionId: rt.sessionId ?? sessionIdFromEvents(events) ?? "",
-            finalText: finalTextFromEvents(events),
-            durationMs: 0,
-            toolCallCount: toolCountFromEvents(events),
-          });
-        }
-
-        let outcome = determineOutcome(events);
-
-        // FIX 1: Non-zero exit from subprocess overrides a successful event stream.
-        if (
-          outcome.succeeded &&
-          runResult !== undefined &&
-          runResult.exitCode !== null &&
-          runResult.exitCode !== 0
-        ) {
-          outcome = {
-            succeeded: false,
-            errorMessage: `process exited ${runResult.exitCode}${runResult.stderr ? `: ${runResult.stderr.slice(0, 500)}` : ""}`,
-            retryable: false,
-          };
-        }
-
-        // Reconcile telemetry from the done event (authoritative).
-        for (const e of events) {
-          if (e.type === "done") {
-            rt.finalText = e.finalText;
-            if (e.sessionId) rt.sessionId = e.sessionId;
-            if (e.costUsd !== undefined) rt.costUsd = e.costUsd;
-            rt.toolCount = e.toolCallCount;
-            break;
-          }
-        }
-        if (rt.filesEdited.length === 0) {
-          rt.filesEdited = fileEditsFromEvents(events);
-        }
-
-        if (outcome.succeeded) {
-          // ── Output-schema post-hoc validation (D2 fallback) ──
-          const schemaEntry = ir.schemas[node.id];
-          const schemaRaw =
-            schemaEntry !== undefined
-              ? schemaEntry
-              : node.outputSchema !== undefined && node.outputSchema !== true
-                ? node.outputSchema
-                : undefined;
-
-          if (schemaRaw !== undefined) {
-            const validation = validateNodeOutput(rt.finalText, schemaRaw);
-            if (validation.ok) {
-              rt.parsedOutput = validation.parsed;
-              rt.status = "completed";
-              rt.endedAt = Date.now();
-              audit?.nodeComplete(node.id, {
-                sessionId: rt.sessionId,
-                durationMs: rt.endedAt - (rt.startedAt ?? rt.endedAt),
-                toolCount: rt.toolCount,
-              });
-              notify();
-              return;
-            }
-            // Schema failure → retryable (fresh session), else fail.
-            rt.error = validation.error;
-            if (shouldRetry(policy, attempt - 1)) {
-              audit?.nodeRetry(node.id, attempt, rt.error);
-              await sleep(backoffMs(policy, attempt));
-              // Re-acquire slots for the next attempt (may contend with others).
-              if (!(await scheduler.acquire(schedulable, signal))) {
-                failNode(node.id, rt, rt.error);
-                return;
-              }
-              slot = slotHandle(scheduler, schedulable); // re-arm for the new hold
-              continue;
-            }
-            failNode(node.id, rt, rt.error);
-            return;
-          }
-
-          rt.status = "completed";
-          rt.endedAt = Date.now();
-          audit?.nodeComplete(node.id, {
-            sessionId: rt.sessionId,
-            durationMs: rt.endedAt - (rt.startedAt ?? rt.endedAt),
-            toolCount: rt.toolCount,
-          });
-          notify();
-          return;
-        }
-
-        // ── Error outcome ──
-        rt.error = outcome.errorMessage ?? "Unknown error";
-        if (outcome.retryable && shouldRetry(policy, attempt - 1)) {
-          audit?.nodeRetry(node.id, attempt, rt.error);
-          await sleep(backoffMs(policy, attempt));
-          if (!(await scheduler.acquire(schedulable, signal))) {
-            failNode(node.id, rt, rt.error);
-            return;
-          }
-          slot = slotHandle(scheduler, schedulable); // re-arm for the new hold
-          continue;
-        }
-
-        failNode(node.id, rt, rt.error);
-        return;
-      }
-    } finally {
-      slot.release();
-    }
-  }
-
-  /**
-   * Acquire scheduler slots for a node and set it to `running`, then delegate
-   * to {@link runNode}. Unconditionally sets the node's status to `running`
-   * before invoking runNode (which owns the remainder of the lifecycle).
-   */
-  async function runNodeWrapper(node: IRNode): Promise<void> {
-    const resolved = resolveProfileSync(
-      (node as { profileRef?: string }).profileRef ?? "default",
-      options.profiles ?? {},
-    );
-    const schedulable: SchedulableNode = {
-      agentType: resolveAgentType(node),
-      provider: resolved?.profile.provider,
-      model: resolved?.profile.model,
-    };
-    if (!(await scheduler.acquire(schedulable, signal))) return;
-    const rt = runState.nodes.get(node.id);
-    if (rt) rt.status = "running";
-    if (rt?.startedAt === undefined && rt) rt.startedAt = Date.now();
-    audit?.nodeStart(node.id);
-    return runNode(node, schedulable);
-  }
-
-  // Create the dispatch context for cond/loop helpers.
-  const loopDispatch: LoopDispatch = {
-    runState,
-    nodeMap,
-    ir,
-    scheduler,
-    signal,
-    promptOverrides,
-    runNodeWrapper,
-    buildPrompt,
-    getAdapter,
-    resolveAgentType,
-    createNodeCtx,
-    rehydrateFn,
-    failNode,
-    notify,
-  };
-
-  /**
-   * Execute a reduce node: gather member outputs and synthesize them.
-   *
-   * Two paths:
-   *   1. Profile present → agent-run synthesis: resolve the profile, get the
-   *      adapter, build a merge prompt, and dispatch to the adapter.
-   *   2. No profile → pure-JS merge: rehydrate the merge fn (if any) or
-   *      deep-merge member outputs.
-   *
-   * For council nodes (primitive.kind === "council"), the instruction prompt
-   * from the council's synthesize spec (primitive.meta.prompt) is passed to
-   * executeSynthesis so the merge prompt includes the user's custom
-   * instruction alongside member outputs.
-   *
-   * SAFETY: The `executeSynthesis` call is wrapped in try/catch so that an
-   * adapter-level throw (buildInvocation / runAgent spawn / emitEvents) is
-   * captured into node state (failed + propagateSkip) instead of propagating
-   * through the reduce promise, which would cause executeDAG to reject with
-   * the node stuck in "running" (never failed/propagateSkip).
-   */
-  async function executeReduceNode(node: IRNode): Promise<void> {
-    if (node.kind !== "reduce") return;
-    const reduceNode = node;
-    const rt = runState.nodes.get(node.id);
-    if (!rt) return;
-
-    const ctx = createNodeCtx(runState, node.id);
-
-    // Extract the custom instruction prompt from primitive metadata.
-    const instructionPrompt =
-      node.primitive?.meta && typeof node.primitive.meta === "object"
-        ? node.primitive.meta["prompt"]
-        : undefined;
-
-    let result: Awaited<ReturnType<typeof executeSynthesis>>;
-    try {
-      // Resolve the profile for agent-run synthesis.
-      // (Moved inside try so every throw routes through failNode.)
-      let adapter: AgentAdapter | undefined;
-      if (reduceNode.profileRef) {
-        const resolved = resolveProfileSync(reduceNode.profileRef, options.profiles ?? {});
-        if (resolved) {
-          const agentType = reduceNode.agentType ?? DEFAULT_AGENT_TYPE;
-          adapter = getAdapter(agentType, node.id);
-        }
-      }
-
-      result = await executeSynthesis({
-        ctx,
-        from: reduceNode.from,
-        adapter,
-        signal,
-        agentType: reduceNode.agentType,
-        instructionPrompt: typeof instructionPrompt === "string" ? instructionPrompt : undefined,
-      });
-    } catch (err) {
-      // Adapter-level throw (buildInvocation / runAgent spawn / emitEvents,
-      // or resolveProfileSync / getAdapter throw).
-      failNode(node.id, rt, err instanceof Error ? err.message : String(err));
-      return;
-    }
-
-    if (result.error) {
-      rt.error = result.error.message;
-      rt.status = "failed";
-      rt.endedAt = Date.now();
-      audit?.nodeFail(node.id, rt.error ?? "reduce node failed");
-      propagateSkip(
-        node.id,
-        runState,
-        "dep-failed",
-        successors,
-        audit
-          ? (skippedId, skipReason) => {
-              audit.nodeSkip(skippedId, skipReason);
-            }
-          : undefined,
-      );
-      notify();
-      return;
-    }
-
-    // Success: set the node's output.
-    const output = result.output;
-    rt.finalText = typeof output === "string" ? output : JSON.stringify(output, null, 2);
-    rt.parsedOutput = output;
+  // Other structural kinds (parallel/sequence) complete as placeholders so
+  // their dependents unblock.
+  if (node.kind !== "node") {
     rt.status = "completed";
+    if (rt.startedAt === undefined) rt.startedAt = Date.now();
     rt.endedAt = Date.now();
-    notify();
+    return true;
   }
 
-  // ── Main execution loop ─────────────────────────────────
+  return schedulePlainNode(ctx, node, rt);
+}
 
+/** Minimal shape of the debounced onUpdate controller used by the main loop. */
+type UpdateController = {
+  call(runState: RunState, poolUsage: PoolUsage): void;
+  flush(): void;
+};
+
+/**
+ * Run the concurrent, scheduler-gated main loop to completion (or abort).
+ *
+ * Each pass: mark newly-ready nodes, dispatch structural nodes, launch ready
+ * nodes, then await the first in-flight completion before re-evaluating.
+ * Terminates when nothing is ready/schedulable and nothing is in flight.
+ */
+async function runMainLoop(
+  ctx: ExecutorContext,
+  loopDispatch: LoopDispatch,
+  update: UpdateController | undefined,
+): Promise<void> {
   for (;;) {
-    if (signal?.aborted) break;
+    if (ctx.signal?.aborted) break;
 
+    const nodeIds = [...ctx.nodeMap.keys()];
     let progressed = false;
-
-    // Snapshot current node ids ONCE per outer-loop iteration (for phases
-    // 1, 2a, and 2b below) to avoid re-spreading on every phase.
-    const nodeIds = [...nodeMap.keys()];
-
-    // ── Phase 1: mark pending → ready where deps are met ──
+    if (markReadyNodes(ctx, nodeIds)) progressed = true;
+    if (dispatchStructuralNodes(ctx, loopDispatch, nodeIds)) progressed = true;
     for (const id of nodeIds) {
-      const rt = runState.nodes.get(id);
-      if (!rt || rt.status !== "pending") continue;
-      if (depsMet(id)) {
-        rt.status = "ready";
-        progressed = true;
-      }
+      if (ctx.signal?.aborted) break;
+      if (scheduleReadyNode(ctx, id)) progressed = true;
     }
 
-    // ── Phase 2a: Process structural nodes (cond / loop) BEFORE regular nodes ──
-    // This ensures cond/loop handlers can claim their subgraph nodes before
-    // Phase 2b schedules them independently.
-    for (const id of nodeIds) {
-      if (signal?.aborted) break;
-      const rt = runState.nodes.get(id);
-      if (!rt || rt.status !== "ready" || inFlight.has(id)) continue;
-      const node = nodeMap.get(id);
-      if (!node) continue;
+    ctx.notify();
+    if (ctx.signal?.aborted) break;
 
-      if (node.kind === "cond") {
-        evaluateCond(node, loopDispatch);
-        progressed = true;
-        continue;
-      }
-
-      if (node.kind === "loop") {
-        // Launch the loop handler as an in-flight promise (just like runNode
-        // for regular nodes).
-        const loopPromise = executeLoop(node, loopDispatch);
-        inFlight.set(id, loopPromise);
-        loopPromise
-          .finally(() => {
-            inFlight.delete(id);
-          })
-          .catch(() => {
-            // executeLoop never rejects (errors are captured into node state).
-          });
-        progressed = true;
-        continue;
-      }
-      // Other structural kinds (reduce, parallel, sequence) are handled
-      // in Phase 2b as placeholders.
-    }
-
-    // ── Phase 2b: Process remaining ready nodes (fanOut / node / other) ──
-    for (const id of nodeIds) {
-      if (signal?.aborted) break;
-      const rt = runState.nodes.get(id);
-      if (!rt || rt.status !== "ready" || inFlight.has(id)) continue;
-      const node = nodeMap.get(id);
-      if (!node) continue;
-
-      // Lazy fanOut expansion at ready-time.
-      if (node.kind === "fanOut") {
-        expandFanOut(node);
-        rt.status = "completed";
-        if (rt.startedAt === undefined) rt.startedAt = Date.now();
-        rt.endedAt = Date.now();
-        progressed = true;
-        continue;
-      }
-
-      // Reduce / council node: wire executeSynthesis.
-      // Gathers member outputs and either merges them in-process (pure-JS)
-      // or dispatches to an agent via the adapter.
-      if (node.kind === "reduce") {
-        // Check all members are completed before synthesizing.
-        const allCompleted = node.from.every((memberId) => {
-          const memberRt = runState.nodes.get(memberId);
-          return memberRt && memberRt.status === "completed";
-        });
-        if (!allCompleted) continue;
-
-        // For agent-run synthesis (profileRef present), acquire scheduler
-        // slots (AND semantics) to respect concurrency limits. Pure-JS
-        // merge (no adapter, synchronous CPU) skips the slot.
-        let schedulable: SchedulableNode | undefined;
-        if (node.profileRef) {
-          const resolved = resolveProfileSync(node.profileRef, options.profiles ?? {});
-          schedulable = {
-            agentType: resolveAgentType(node),
-            provider: resolved?.profile.provider,
-            model: resolved?.profile.model,
-          };
-          if (!scheduler.tryAcquire(schedulable)) continue;
-        }
-
-        rt.status = "running";
-        if (rt.startedAt === undefined) rt.startedAt = Date.now();
-        const reducePromise = executeReduceNode(node)
-          .finally(() => {
-            inFlight.delete(id);
-            if (schedulable) scheduler.release(schedulable);
-          })
-          .catch(() => {
-            // executeReduceNode never rejects (errors are captured into
-            // node state via try/catch + failNode).
-          });
-        inFlight.set(id, reducePromise);
-        progressed = true;
-        continue;
-      }
-
-      // Other structural kinds (parallel/sequence) complete as placeholders
-      // so their dependents unblock.
-      if (node.kind !== "node") {
-        rt.status = "completed";
-        if (rt.startedAt === undefined) rt.startedAt = Date.now();
-        rt.endedAt = Date.now();
-        progressed = true;
-        continue;
-      }
-
-      // Plain node: acquire scheduler slots (AND semantics) before launching.
-      const resolved = resolveProfileSync(node.profileRef ?? "default", options.profiles ?? {});
-      const schedulable: SchedulableNode = {
-        agentType: resolveAgentType(node),
-        provider: resolved?.profile.provider,
-        model: resolved?.profile.model,
-      };
-      if (!scheduler.tryAcquire(schedulable)) continue; // stays ready; retried next pass
-
-      rt.status = "running";
-      if (rt.startedAt === undefined) rt.startedAt = Date.now();
-      const runPromise = runNode(node, schedulable).finally(() => {
-        inFlight.delete(id);
-      });
-      inFlight.set(id, runPromise);
-      progressed = true;
-    }
-
-    notify();
-
-    if (signal?.aborted) break;
-
-    // ── Phase 3: await the first in-flight completion, or terminate ──
-    if (inFlight.size > 0) {
-      await Promise.race(inFlight.values());
+    // Await the first in-flight completion, or terminate when finished.
+    if (ctx.inFlight.size > 0) {
+      await Promise.race(ctx.inFlight.values());
       update?.flush();
     } else if (!progressed) {
-      // Nothing ready/schedulable and nothing running → the run is finished.
       break;
     }
-    // else: progressed (e.g. structural nodes completed or fanOut expanded) but
-    // nothing launched this pass → loop again to pick up newly-ready children.
+    // else: progressed this pass but nothing launched → loop again to pick up
+    // newly-ready children (e.g. fanOut expansion).
   }
+}
 
-  // Drain any in-flight coroutines so executeDAG settles fully on abort.
-  // The drain is bounded by a timeout: a misbehaving adapter that ignores the
-  // abort signal could leave an in-flight promise that never settles, which
-  // would otherwise hang executeDAG forever. On timeout, log a warning and
-  // return rather than waiting indefinitely.
-  const drainTimeoutMs = options.abortDrainTimeoutMs ?? ABORT_DRAIN_TIMEOUT_MS;
+/**
+ * Acquire scheduler slots for a node and set it `running`, then delegate to
+ * {@link runNode}. Used by cond/loop dispatch (async acquire, blocking); the
+ * main loop uses `tryAcquire` directly for plain nodes. Unconditionally sets
+ * the node `running` before invoking runNode (which owns the rest of the
+ * lifecycle).
+ */
+async function runNodeWrapper(ctx: ExecutorContext, node: IRNode): Promise<void> {
+  const schedulable = schedulableFor(ctx, node);
+  if (!(await ctx.scheduler.acquire(schedulable, ctx.signal))) return;
+  const rt = ctx.runState.nodes.get(node.id);
+  if (rt) rt.status = "running";
+  if (rt && rt.startedAt === undefined) rt.startedAt = Date.now();
+  ctx.audit?.nodeStart(node.id);
+  return runNode(ctx, node, schedulable);
+}
+
+/**
+ * Drain in-flight coroutines so executeDAG settles fully on abort. Bounded by a
+ * timeout: a misbehaving adapter that ignores the abort signal could leave an
+ * in-flight promise that never settles. On timeout, warn and give up.
+ */
+async function drainInFlight(
+  inFlight: Map<string, Promise<void>>,
+  abortDrainTimeoutMs: number | undefined,
+): Promise<void> {
+  const drainTimeoutMs = abortDrainTimeoutMs ?? ABORT_DRAIN_TIMEOUT_MS;
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
   const drainTimeout = new Promise<"timeout">((resolve) => {
     drainTimer = setTimeout(() => {
@@ -901,10 +348,83 @@ export async function executeDAG(options: ExecuteDAGOptions): Promise<RunSummary
       `[wisp] executeDAG: in-flight drain timed out after ${drainTimeoutMs}ms with ${inFlight.size} promise(s) still unsettled; giving up`,
     );
   }
+}
 
+// ─── Main entry point ─────────────────────────────────────────────
+
+/**
+ * Execute a compiled DAG against the given run state.
+ *
+ * Builds an {@link ExecutorContext} bundling the shared mutable state, wires a
+ * {@link LoopDispatch} for cond/loop helpers, runs the concurrent main loop,
+ * drains any in-flight coroutines, and returns a {@link RunSummary} with
+ * per-node results and aggregate totals.
+ */
+export async function executeDAG(options: ExecuteDAGOptions): Promise<RunSummary> {
+  const { ir, runState, getAdapter, scheduler, signal, onUpdate, audit } = options;
+
+  const defaultRetries = ir.options.defaultRetries ?? CONFIG_DEFAULTS.defaultRetries;
+  const retryBackoff = options.retryBackoffMs ?? CONFIG_DEFAULTS.retryBackoffMs;
+  const update = onUpdate
+    ? debounce((rs: RunState, pu: PoolUsage) => {
+        onUpdate(rs, pu);
+      }, UPDATE_DEBOUNCE_MS)
+    : undefined;
+  const notify = (): void => {
+    update?.call(runState, scheduler.usage());
+  };
+
+  // Mutable node map (seeded from IR, extended with dynamic fanOut children)
+  // and pre-built adjacency maps for O(1) predecessor/successor lookups.
+  const nodeMap = new Map<string, IRNode>();
+  for (const n of ir.nodes) nodeMap.set(n.id, n);
+  const successors = buildSuccessorsMap(ir.edges);
+  const predecessors = buildPredecessorsMap(ir.edges);
+  const promptOverrides = new Map<string, string>();
+  const inFlight = new Map<string, Promise<void>>();
+
+  const ctx: ExecutorContext = {
+    ir,
+    runState,
+    nodeMap,
+    successors,
+    predecessors,
+    promptOverrides,
+    inFlight,
+    scheduler,
+    signal,
+    audit,
+    defaultRetries,
+    retryBackoff,
+    options,
+    notify,
+    getAdapter,
+  };
+
+  // Dispatch context for cond/loop helpers — binds the extracted functions to ctx.
+  const loopDispatch: LoopDispatch = {
+    runState,
+    nodeMap,
+    ir,
+    scheduler,
+    signal,
+    promptOverrides,
+    runNodeWrapper: (node) => runNodeWrapper(ctx, node),
+    buildPrompt: (node) => buildPrompt(ctx, node),
+    getAdapter,
+    resolveAgentType,
+    createNodeCtx,
+    rehydrateFn,
+    failNode: (nodeId, rt, message) => {
+      failNode(ctx, nodeId, rt, message);
+    },
+    notify,
+  };
+
+  await runMainLoop(ctx, loopDispatch, update);
+  await drainInFlight(inFlight, options.abortDrainTimeoutMs);
   update?.flush();
 
-  // ── Build and return RunSummary ──────────────────────────
   const nodeEntries = Array.from(runState.nodes.entries());
   return {
     runId: runState.runId,
