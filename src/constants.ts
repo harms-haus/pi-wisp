@@ -56,3 +56,11 @@ export const CONFIG_DEFAULTS = {
 
 /** Maximum number of messages persisted per session file before oldest are dropped. */
 export const MAX_MESSAGES_PER_SESSION = 500;
+
+/**
+ * Default timeout (ms) for draining in-flight coroutines after the main loop
+ * exits (e.g. on abort). Bounds the trailing `Promise.allSettled` so a
+ * misbehaving adapter that ignores the abort signal cannot hang executeDAG
+ * forever.
+ */
+export const ABORT_DRAIN_TIMEOUT_MS = 30_000;

@@ -51,7 +51,7 @@ import type {
   RunState,
 } from "../types.js";
 import { debounce } from "../utils.js";
-import { CONFIG_DEFAULTS, DEFAULT_AGENT_TYPE } from "../constants.js";
+import { CONFIG_DEFAULTS, DEFAULT_AGENT_TYPE, ABORT_DRAIN_TIMEOUT_MS } from "../constants.js";
 import { createNodeCtx } from "./context.js";
 import {
   resolvePolicy,
@@ -115,6 +115,14 @@ export interface ExecuteDAGOptions {
    * the audit log as the node runs.
    */
   audit?: AuditLogger;
+  /**
+   * Override for the post-loop in-flight drain timeout in ms (default:
+   * {@link ABORT_DRAIN_TIMEOUT_MS}). Bounds the trailing
+   * `Promise.allSettled` so an adapter that ignores the abort signal and
+   * never settles cannot hang executeDAG forever. When the drain times out,
+   * a warning is logged and executeDAG returns regardless.
+   */
+  abortDrainTimeoutMs?: number;
 }
 
 /** Coalesce rapid `onUpdate` calls into a single TUI re-render. */
@@ -872,7 +880,27 @@ export async function executeDAG(options: ExecuteDAGOptions): Promise<RunSummary
   }
 
   // Drain any in-flight coroutines so executeDAG settles fully on abort.
-  await Promise.allSettled([...inFlight.values()]);
+  // The drain is bounded by a timeout: a misbehaving adapter that ignores the
+  // abort signal could leave an in-flight promise that never settles, which
+  // would otherwise hang executeDAG forever. On timeout, log a warning and
+  // return rather than waiting indefinitely.
+  const drainTimeoutMs = options.abortDrainTimeoutMs ?? ABORT_DRAIN_TIMEOUT_MS;
+  let drainTimer: ReturnType<typeof setTimeout> | undefined;
+  const drainTimeout = new Promise<"timeout">((resolve) => {
+    drainTimer = setTimeout(() => {
+      resolve("timeout");
+    }, drainTimeoutMs);
+  });
+  const drainResult = await Promise.race([
+    Promise.allSettled([...inFlight.values()]).then(() => "settled" as const),
+    drainTimeout,
+  ]);
+  if (drainTimer) clearTimeout(drainTimer);
+  if (drainResult === "timeout") {
+    console.warn(
+      `[wisp] executeDAG: in-flight drain timed out after ${drainTimeoutMs}ms with ${inFlight.size} promise(s) still unsettled; giving up`,
+    );
+  }
 
   update?.flush();
 

@@ -17,7 +17,7 @@
  * src/engine/executor.ts.
  */
 
-import { vi, describe, it, expect } from "vitest";
+import { vi, describe, it, expect, afterEach } from "vitest";
 
 // ── Mock the spawner so we can simulate subprocess crashes with exit codes ──
 vi.mock("../../spawn/spawner.js");
@@ -1618,5 +1618,178 @@ describe("slot-release invariant (slots always released, even on error/abort pat
     expect(runState.nodes.get("n2")?.status).toBe("completed");
     expect(runState.nodes.get("n3")?.status).toBe("completed");
     expect(scheduler.usage().global.used).toBe(0);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// Concurrency termination & in-flight drain safety
+//
+// Two related guarantees about the tail of the main execution loop:
+//
+//  (1) Near-simultaneous completions — `Promise.race(inFlight.values())`
+//      resolves with only ONE completion per pass. The loop must keep
+//      re-evaluating (awaiting the next race) for as long as anything remains
+//      in flight, and must NOT break merely because a pass made no *new*
+//      progress (`progressed === false`). The only valid termination is
+//      `inFlight.size === 0 && !progressed`. This is a characterization test
+//      pinning that invariant — it passes against the current (correct) code
+//      and guards against a regression that re-orders the break check.
+//
+//  (2) Bounded drain — after the loop exits (e.g. on abort), the trailing
+//      `Promise.allSettled([...inFlight.values()])` must not wait forever for
+//      an in-flight promise that never settles (a misbehaving adapter that
+//      ignores the abort signal). It must be bounded by a drain timeout so
+//      `executeDAG` always returns and logs a warning.
+// ══════════════════════════════════════════════════════════════════════
+
+describe("concurrency termination & in-flight drain safety", () => {
+  /**
+   * Build a fake adapter whose `emitEvents` completes after `ms`, emitting a
+   * `session` event then a `done` event. Lets a test stagger node completion
+   * times precisely, independent of the default event sequence.
+   */
+  function completingAfter(ms: number, finalText: string): FakeAgentAdapter {
+    const sid = `s-${ms}-${finalText}`;
+    const adapter = createFakeAdapter({ sessionId: sid, finalText });
+    adapter.emitEvents = async (onEvent: (event: NormalizedEvent) => void): Promise<void> => {
+      onEvent({ type: "session", id: sid });
+      if (ms > 0) await new Promise((resolve) => setTimeout(resolve, ms));
+      onEvent({
+        type: "done",
+        sessionId: sid,
+        finalText,
+        durationMs: ms,
+        toolCallCount: 0,
+      });
+    };
+    return adapter;
+  }
+
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  afterEach(() => {
+    warnSpy?.mockRestore();
+    warnSpy = undefined;
+  });
+
+  // ── (1) Characterization: all near-simultaneous completions processed ──
+  it("processes ALL near-simultaneous in-flight completions, never breaking while work remains in flight", async () => {
+    // Four independent producers fan into a single sink. Producer "a" finishes
+    // early; "b","c","d" finish (near-)simultaneously later. The pass right
+    // after "a" completes has `progressed === false` (the sink is not ready
+    // until ALL producers are done) yet `inFlight.size > 0`. The loop MUST keep
+    // awaiting `Promise.race` here rather than breaking on `!progressed`; a
+    // premature break would strand b/c/d in "running" and the sink would never
+    // run.
+    const ir: GraphIR = {
+      title: "near-simultaneous",
+      slug: "near-simultaneous",
+      options: {},
+      nodes: [
+        { id: "a", kind: "node", profileRef: "default", prompt: "a" },
+        { id: "b", kind: "node", profileRef: "default", prompt: "b" },
+        { id: "c", kind: "node", profileRef: "default", prompt: "c" },
+        { id: "d", kind: "node", profileRef: "default", prompt: "d" },
+        { id: "sink", kind: "node", profileRef: "default", prompt: "sink" },
+      ],
+      edges: [
+        { from: "a", to: "sink", kind: "dep" },
+        { from: "b", to: "sink", kind: "dep" },
+        { from: "c", to: "sink", kind: "dep" },
+        { from: "d", to: "sink", kind: "dep" },
+      ],
+      conditions: [],
+      schemas: {},
+      primitives: {},
+    };
+    const runState = makeRunState(ir);
+    const scheduler = createScheduler({ maxAgentConcurrency: 8 });
+
+    const fast = completingAfter(2, "a-done");
+    const slow = completingAfter(30, "x-done");
+    const getAdapter = (_type?: string, nodeId?: string): AgentAdapter => {
+      if (nodeId === "a") return fast;
+      if (nodeId === "b" || nodeId === "c" || nodeId === "d") return slow;
+      return makeDefaultAdapter({ finalText: "sink-done" });
+    };
+
+    await withTimeout(executeDAG({ ir, runState, getAdapter: getAdapter as any, scheduler }), 5000);
+
+    // Every producer completed (none stranded "running" by an early break).
+    expect(runState.nodes.get("a")?.status).toBe("completed");
+    expect(runState.nodes.get("b")?.status).toBe("completed");
+    expect(runState.nodes.get("c")?.status).toBe("completed");
+    expect(runState.nodes.get("d")?.status).toBe("completed");
+    // The sink depends on ALL four producers — it can only have run if every
+    // near-simultaneous completion was observed, not just the first raced one.
+    expect(runState.nodes.get("sink")?.status).toBe("completed");
+  });
+
+  // ── (2) RED: bounded drain timeout for a never-settling in-flight promise ──
+  it("does not hang forever draining an in-flight promise that never settles (bounded drain timeout)", async () => {
+    // "hanger" launches FIRST and parks forever: its emitEvents ignores the
+    // abort signal and returns a promise that never resolves. "aborter"
+    // launches SECOND, completes, and aborts the run — so the main loop breaks
+    // (via the post-phase abort check) with "hanger" still in flight. The
+    // trailing `Promise.allSettled([...inFlight])` must NOT wait forever for
+    // "hanger"; a bounded drain timeout must let executeDAG return and log a
+    // warning. Against the unpatched code this hangs (the test times out).
+    const ir: GraphIR = {
+      title: "drain-hang",
+      slug: "drain-hang",
+      options: {},
+      nodes: [
+        { id: "hanger", kind: "node", profileRef: "default", prompt: "hang" },
+        { id: "aborter", kind: "node", profileRef: "default", prompt: "abort" },
+      ],
+      edges: [],
+      conditions: [],
+      schemas: {},
+      primitives: {},
+    };
+    const runState = makeRunState(ir);
+    const scheduler = createScheduler({ maxAgentConcurrency: 8 });
+    const controller = new AbortController();
+
+    const hangingAdapter = createFakeAdapter({});
+    // Never resolves, never rejects; deliberately ignores the abort signal.
+    hangingAdapter.emitEvents = (): Promise<void> => new Promise(() => {});
+
+    const abortingAdapter = createFakeAdapter({
+      sessionId: "aborter-sess",
+      finalText: "done",
+    });
+    abortingAdapter.emitEvents = async (
+      onEvent: (event: NormalizedEvent) => void,
+    ): Promise<void> => {
+      onEvent({ type: "session", id: "aborter-sess" });
+      controller.abort();
+    };
+
+    const getAdapter = (_type?: string, nodeId?: string): AgentAdapter =>
+      nodeId === "hanger" ? hangingAdapter : abortingAdapter;
+
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const summary = await withTimeout(
+      executeDAG({
+        ir,
+        runState,
+        getAdapter: getAdapter as any,
+        scheduler,
+        signal: controller.signal,
+        abortDrainTimeoutMs: 300,
+      }),
+      3000,
+    );
+
+    // The run settled — the drain did not hang forever.
+    expect(summary).toBeDefined();
+    expect(typeof summary.runId).toBe("string");
+    // A warning must be emitted when the drain times out.
+    expect(
+      warnSpy.mock.calls.some(
+        (call: unknown[]) => typeof call[0] === "string" && /drain/i.test(call[0]),
+      ),
+    ).toBe(true);
   });
 });
