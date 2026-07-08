@@ -23,7 +23,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -343,19 +343,55 @@ describe("runWorkflow — run lifecycle orchestration", () => {
       expect(dagOptions!.ir).toBe(ir);
       expect(typeof dagOptions!.getAdapter).toBe("function");
 
-      // 1f. Run.json was written — check on-disk file existence
+      // 1f. Run.json was written. The mock-call assertion verifies the
+      // orchestrator passes the real runDir + a RunState object (wiring that
+      // `run.json` lands in the run dir); the observable content is verified
+      // below by reading the file itself.
       expect(writeRunJson).toHaveBeenCalledWith(runDir, expect.any(Object));
 
-      // 1g. Audit run.complete was logged
+      // 1g. Audit run.complete was logged. This mock assertion is meaningful:
+      // it pins the terminal-event contract (a successful run MUST emit
+      // run.complete, never run.fail) that downstream tooling / reconstruction
+      // depends on. The audit.jsonl content is read below as a cross-check.
       expect(AuditLogger.prototype.runComplete).toHaveBeenCalled();
 
-      // 1h. Run was persisted via pi.appendEntry
+      // 1h. Run was persisted via pi.appendEntry. Strengthened from a bare
+      // `expect.any(Object)` to assert the persisted snapshot actually carries
+      // the terminal run state (status + node results), not just that some
+      // object was handed off.
+      expect(appendEntry).toHaveBeenCalledTimes(1);
       expect(appendEntry).toHaveBeenCalledWith("wisp:run", expect.any(Object));
+      const persisted = appendEntry.mock.calls[0]?.[1] as {
+        status: string;
+        nodes: { id: string; status: string }[];
+      };
+      expect(persisted).toBeDefined();
+      expect(persisted.status).toBe("completed");
+      expect(persisted.nodes).toHaveLength(3);
+      expect(persisted.nodes.every((n) => n.status === "completed")).toBe(true);
 
-      // 1i. On-disk artifacts exist
+      // 1i. On-disk artifacts exist AND carry the correct observable content.
       expect(existsSync(join(runDir, "run.json"))).toBe(true);
       expect(existsSync(join(runDir, "audit.jsonl"))).toBe(true);
       expect(existsSync(join(runDir, "sessions"))).toBe(true);
+
+      // run.json reflects the reconciled terminal state, not just any blob.
+      const manifest = JSON.parse(readFileSync(join(runDir, "run.json"), "utf-8"));
+      expect(manifest.status).toBe("completed");
+      expect(manifest.title).toBe(ir.title);
+      expect(manifest.slug).toBe(ir.slug);
+      expect(manifest.nodes).toHaveLength(3);
+      expect(manifest.totals.completed).toBe(3);
+      expect(manifest.totals.failed).toBe(0);
+
+      // audit.jsonl records the run.complete terminal event on disk.
+      const auditLines = readFileSync(join(runDir, "audit.jsonl"), "utf-8")
+        .split("\n")
+        .filter((l) => l.trim().length > 0)
+        .map((l) => JSON.parse(l));
+      expect(auditLines.some((e: { type: string }) => e.type === "run.start")).toBe(true);
+      expect(auditLines.some((e: { type: string }) => e.type === "run.complete")).toBe(true);
+      expect(auditLines.some((e: { type: string }) => e.type === "run.fail")).toBe(false);
     });
 
     it("supports pre-compiled IR (skips compilation) for resume scenarios", async () => {
@@ -500,7 +536,10 @@ describe("runWorkflow — run lifecycle orchestration", () => {
       expect(success.summary.totals.completed).toBe(3);
       expect(success.summary.nodes).toHaveLength(4);
 
-      // Audit run.complete was called (NOT runFail).
+      // Audit run.complete was called (NOT runFail). These mock assertions are
+      // meaningful: they pin the benign-skip contract — a cond-not-taken skip
+      // must still terminate as run.complete, which the on-disk run.json check
+      // below corroborates from the observable artifact.
       expect(AuditLogger.prototype.runComplete).toHaveBeenCalled();
       expect(AuditLogger.prototype.runFail).not.toHaveBeenCalled();
 
@@ -510,9 +549,16 @@ describe("runWorkflow — run lifecycle orchestration", () => {
         expect.objectContaining({ status: "completed" }),
       );
 
-      // On-disk artifacts exist.
+      // On-disk artifacts exist AND carry the reconciled terminal state.
       expect(existsSync(join(runDir, "run.json"))).toBe(true);
       expect(existsSync(join(runDir, "audit.jsonl"))).toBe(true);
+      // The manifest proves the cond-not-taken skip did NOT fail the run.
+      const manifest = JSON.parse(readFileSync(join(runDir, "run.json"), "utf-8"));
+      expect(manifest.status).toBe("completed");
+      expect(manifest.nodes).toHaveLength(4);
+      expect(manifest.totals.completed).toBe(3);
+      expect(manifest.totals.skipped).toBe(1);
+      expect(manifest.totals.failed).toBe(0);
     });
   });
 
@@ -598,7 +644,32 @@ describe("runWorkflow — run lifecycle orchestration", () => {
 
       vi.mocked(compileWorkflow).mockResolvedValueOnce({ ir });
       vi.mocked(createRunDir).mockReturnValueOnce(runDir);
-      vi.mocked(executeDAG).mockResolvedValueOnce(failureSummary);
+      // Mutate runState to mirror the failure summary (node b failed, c
+      // dep-skipped) so the on-disk run.json reflects the failure — matching
+      // what the real executor would leave behind.
+      vi.mocked(executeDAG).mockImplementationOnce(async (opts) => {
+        opts.runState.nodes.set("a", {
+          status: "completed",
+          attempts: 0,
+          toolCount: 0,
+          filesEdited: [],
+        });
+        opts.runState.nodes.set("b", {
+          status: "failed",
+          attempts: 2,
+          toolCount: 1,
+          filesEdited: [],
+          error: "Task B failed",
+        });
+        opts.runState.nodes.set("c", {
+          status: "skipped",
+          attempts: 0,
+          toolCount: 0,
+          filesEdited: [],
+          error: "dep-failed",
+        });
+        return failureSummary;
+      });
 
       const options = makeOptions({
         runsDir,
@@ -621,14 +692,31 @@ describe("runWorkflow — run lifecycle orchestration", () => {
       expect(createRunDir).toHaveBeenCalled();
       expect(executeDAG).toHaveBeenCalled();
 
-      // Audit run.fail was called
+      // Audit run.fail was called. This mock assertion is meaningful: it pins
+      // the run-level failure signal that reconstruction / tooling reads. The
+      // error substring also guards against regressing the message content.
+      // The on-disk audit.jsonl + run.json checks below corroborate it from
+      // the observable artifacts.
       expect(AuditLogger.prototype.runFail).toHaveBeenCalledWith(
         expect.stringContaining("Task B failed"),
       );
 
-      // On-disk artifacts exist despite the failure
+      // On-disk artifacts exist despite the failure AND reflect the failure.
       expect(existsSync(join(runDir, "run.json"))).toBe(true);
       expect(existsSync(join(runDir, "audit.jsonl"))).toBe(true);
+      // run.json must be marked failed (the node failure propagated to the run).
+      const manifest = JSON.parse(readFileSync(join(runDir, "run.json"), "utf-8"));
+      expect(manifest.status).toBe("failed");
+      expect(manifest.totals.failed).toBe(1);
+      expect(manifest.totals.skipped).toBe(1);
+      // audit.jsonl records the terminal run.fail event with the node error.
+      const failEvents = readFileSync(join(runDir, "audit.jsonl"), "utf-8")
+        .split("\n")
+        .filter((l) => l.trim().length > 0)
+        .map((l) => JSON.parse(l))
+        .filter((e: { type: string }) => e.type === "run.fail");
+      expect(failEvents).toHaveLength(1);
+      expect(failEvents[0].error).toContain("Task B failed");
     });
   });
 
@@ -661,8 +749,24 @@ describe("runWorkflow — run lifecycle orchestration", () => {
       // There is no summary because execution never completed.
       expect(failure.summary).toBeUndefined();
 
-      // The audit was informed of the run failure.
+      // The audit was informed of the run failure. This mock assertion is
+      // meaningful: it verifies the mid-run finalization guard fires the
+      // terminal failure event even when execution throws, which the
+      // on-disk artifacts below corroborate as the observable outcome.
       expect(AuditLogger.prototype.runFail).toHaveBeenCalled();
+
+      // Observable outcomes: the run is marked in an error state on disk.
+      expect(existsSync(join(runDir, "run.json"))).toBe(true);
+      expect(existsSync(join(runDir, "audit.jsonl"))).toBe(true);
+      const manifest = JSON.parse(readFileSync(join(runDir, "run.json"), "utf-8"));
+      expect(manifest.status).toBe("error");
+      const failEvents = readFileSync(join(runDir, "audit.jsonl"), "utf-8")
+        .split("\n")
+        .filter((l) => l.trim().length > 0)
+        .map((l) => JSON.parse(l))
+        .filter((e: { type: string }) => e.type === "run.fail");
+      expect(failEvents.length).toBeGreaterThanOrEqual(1);
+      expect(failEvents[0].error).toContain("terminated");
     });
 
     it("handles an AbortSignal triggering mid-run", async () => {

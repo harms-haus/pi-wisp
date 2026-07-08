@@ -164,34 +164,45 @@ describe("validateOutputAgainstSchema", () => {
 });
 
 describe("SHADOWED_GLOBALS", () => {
-  it("is an array of identifier strings used for parameter shadowing", () => {
-    // EXPECTED CONTRACT:
-    //   - It is a readonly array of strings
-    //   - It includes at least: require, process, fs, fetch, globalThis
+  it("includes the safety-critical Node / runtime globals the guardrail must shadow", () => {
+    // Rather than re-state every element of the literal, verify the *coverage*
+    // guarantee of the guardrail: the globals most likely to leak filesystem /
+    // process / network access into an otherwise-pure DSL fn must be present.
     expect(Array.isArray(SHADOWED_GLOBALS)).toBe(true);
+    expect(SHADOWED_GLOBALS.length).toBeGreaterThan(0);
+    // Filesystem / module-loading escape hatches
     expect(SHADOWED_GLOBALS).toContain("require");
-    expect(SHADOWED_GLOBALS).toContain("process");
     expect(SHADOWED_GLOBALS).toContain("fs");
+    expect(SHADOWED_GLOBALS).toContain("__dirname");
+    expect(SHADOWED_GLOBALS).toContain("__filename");
+    // Process environment / network
+    expect(SHADOWED_GLOBALS).toContain("process");
     expect(SHADOWED_GLOBALS).toContain("fetch");
     expect(SHADOWED_GLOBALS).toContain("globalThis");
-    expect(SHADOWED_GLOBALS).toContain("Buffer");
-    expect(SHADOWED_GLOBALS).toContain("setTimeout");
-    expect(SHADOWED_GLOBALS).toContain("URL");
-    // Should not be empty
-    expect(SHADOWED_GLOBALS.length).toBeGreaterThan(0);
   });
 });
 
 describe("SHADOWABLE_PARAMS", () => {
+  // `RESERVED_KEYWORDS` is intentionally NOT exported from the module, so the
+  // filter relationship is verified behaviorally / by cross-check rather than
+  // by re-stating the internal set verbatim.
+
+  it("is a strict subset of SHADOWED_GLOBALS (the filter drops reserved keywords)", () => {
+    // Every shadowable param must originate from the source global list —
+    // nothing foreign is injected by the filter.
+    expect(SHADOWABLE_PARAMS.every((p) => SHADOWED_GLOBALS.includes(p))).toBe(true);
+    // The filter must actually *remove* reserved keywords that appear in the
+    // source list. `import` is a reserved keyword (illegal as a `new Function`
+    // parameter name) and IS present in SHADOWED_GLOBALS, so it must be the
+    // one element excluded — proving the filter relationship works.
+    expect(SHADOWED_GLOBALS).toContain("import");
+    expect(SHADOWABLE_PARAMS).not.toContain("import");
+  });
+
   it("contains no JavaScript reserved keywords illegal as parameter names", () => {
-    // Keywords that are NOT legal new Function parameter names:
-    // - eval and arguments are quasi-reserved (can't be parameter names in strict mode)
-    // - import is a module syntax keyword
-    // - await is contextual but illegal as a parameter name in async contexts
-    //   (new Function always runs in the global `async` context? no, it doesn't —
-    //    but await is still in the reserved word list for potential future use)
-    // - class, let, const, enum, extends, super, yield, return, function,
-    //   var, new, delete, typeof, void, this are all reserved words
+    // Cross-check against the ES reserved-word concept: any keyword that is
+    // illegal as a `new Function` parameter name would raise a SyntaxError at
+    // rehydration construction time, so it must have been filtered out.
     const RESERVED: readonly string[] = [
       "eval",
       "arguments",
@@ -213,12 +224,39 @@ describe("SHADOWABLE_PARAMS", () => {
       "void",
       "this",
     ];
-
-    // EXPECTED CONTRACT:
-    //   SHADOWABLE_PARAMS filters out all reserved keywords (they cannot
-    //   legally be parameter names in new Function). If any of these appear,
-    //   rehydration will throw a SyntaxError at construction time.
+    // Equivalent to: SHADOWABLE_PARAMS.every(p => !RESERVED_KEYWORDS.has(p))
     const leaked = RESERVED.filter((k) => SHADOWABLE_PARAMS.includes(k));
     expect(leaked).toEqual([]);
+  });
+
+  it("still DOES contain the expected shadowable globals (require, process, fs)", () => {
+    // The filter must NOT over-prune: the safety-critical globals survive into
+    // the actual parameter list used at rehydration.
+    expect(SHADOWABLE_PARAMS).toContain("require");
+    expect(SHADOWABLE_PARAMS).toContain("process");
+    expect(SHADOWABLE_PARAMS).toContain("fs");
+  });
+
+  // ── Behavioral guardrail verification ────────────────────────────
+  // Rather than only asserting on the constant array contents, prove the
+  // guardrail actually works end-to-end via serialize → rehydrate.
+
+  it("guardrail: rehydrating a fn that CALLS a shadowed global (require) throws TypeError", () => {
+    // `require` is shadowed to `undefined` at rehydration, so invoking it
+    // raises a TypeError — proving the guardrail blocks module loading.
+    // The require() call is intentional: the test exercises the guardrail,
+    // so the no-require-imports rule is disabled for this line only.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fn = (_ctx: unknown) => require("node:os");
+    const desc = serializeFn(fn, "iterate");
+    expect(() => rehydrateFn(desc, makeFakeNodeCtx())).toThrow(TypeError);
+  });
+
+  it("guardrail: a shadowed global (process) evaluates to `undefined` inside the rehydrated fn", () => {
+    // `typeof` does not throw on undefined, so this proves the shadowing
+    // *binds* process to undefined rather than leaking the real global.
+    const fn = () => typeof process;
+    const desc = serializeFn(fn, "iterate");
+    expect(rehydrateFn(desc, makeFakeNodeCtx())).toBe("undefined");
   });
 });

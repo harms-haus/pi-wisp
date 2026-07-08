@@ -40,8 +40,13 @@ describe("wf entry point", () => {
   it("wf(name) with no options sets defaults", () => {
     const builder = wf("minimal");
     const ir = builder.toIR();
-    expect(ir.options).toBeDefined();
+    // `options` is always initialised to an object by the builder, so a bare
+    // `toBeDefined()` is tautological. Assert the actual default values
+    // instead: both optional knobs default to `undefined` (no cap, no retries)
+    // rather than some implicit sentinel.
     expect(typeof ir.options).toBe("object");
+    expect(ir.options.maxConcurrency).toBeUndefined();
+    expect(ir.options.defaultRetries).toBeUndefined();
   });
 });
 

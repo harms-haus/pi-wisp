@@ -7,7 +7,15 @@ export default tseslint.config(
   ...tseslint.configs.strictTypeChecked,
   prettierConfig,
   {
-    ignores: ["dist/", "node_modules/", "coverage/", "vitest.config.ts", "src/__tests__/dsl/fixtures/", "src/__tests__/e2e/fixtures/"],
+    ignores: [
+      "dist/",
+      "node_modules/",
+      "coverage/",
+      "vitest.config.ts",
+      "eslint.config.js",
+      "src/__tests__/dsl/fixtures/",
+      "src/__tests__/e2e/fixtures/",
+    ],
   },
   {
     files: ["src/**/*.ts"],
