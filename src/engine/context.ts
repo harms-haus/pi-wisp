@@ -82,15 +82,9 @@ export function createNodeCtx(runState: RunState, nodeId: string): NodeCtx {
           return { output: nodeOutput(rt) };
         }
       }
-      // Fallback: try the old flat naming ("member-<index>") for backward
-      // compatibility with simpler test fixtures.
-      const legacyRt = runState.nodes.get(`member-${index}`);
-      if (legacyRt) {
-        return { output: nodeOutput(legacyRt) };
-      }
       throw new Error(
-        `member: member-${index} was not found in the run state. ` +
-          `Looked for key ending in ":member:${index}" or "member-${index}".`,
+        `member: no member node found for index ${index}. ` +
+          `Looked for a key ending in ":member:${index}".`,
       );
     },
 

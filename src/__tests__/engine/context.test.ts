@@ -172,17 +172,17 @@ describe("createNodeCtx", () => {
   });
 
   it("member(i).output returns the output of the i-th member", () => {
-    // Arrange: a council node "council" has members "member-0", "member-1".
+    // Arrange: a council node "council" has members "council-synth:member:0", "council-synth:member:1".
     const runState = buildFakeRunState("run-1", "Council Task", [
       [
-        "member-0",
+        "council-synth:member:0",
         {
           status: "completed",
           parsedOutput: { opinion: "approve" },
         },
       ],
       [
-        "member-1",
+        "council-synth:member:1",
         {
           status: "completed",
           parsedOutput: { opinion: "changes" },
