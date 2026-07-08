@@ -23,10 +23,8 @@ import type { WispProfile } from "./types.js";
  */
 export function inlineProfile(fields: Partial<WispProfile> & { name: string }): WispProfile {
   // `name` is the profile's map key (not a WispProfile field) — strip it.
-  const { name: _name, ...rest } = fields;
-  void _name;
-
-  const profile: WispProfile = { ...rest };
+  const profile = { ...fields } as WispProfile;
+  delete (profile as WispProfile & { name?: string }).name;
 
   if (!profile.agentType) {
     profile.agentType = DEFAULT_AGENT_TYPE;
