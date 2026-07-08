@@ -20,6 +20,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { loadConfig } from "./config.js";
 
 export { builderPath, harnessPath } from "./constants.js";
+export { wf } from "./dsl/builder.js";
+export type { WorkflowBuilder, WfOptions, ReduceOpts } from "./dsl/builder.js";
 import { runWorkflowTool } from "./tools/run-workflow.js";
 import { listProfilesTool } from "./tools/list-profiles.js";
 import { createRunStore } from "./run/store.js";

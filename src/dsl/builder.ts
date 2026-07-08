@@ -24,7 +24,13 @@ import { kebabCase } from "../utils.js";
 import { serializeFn } from "./fn-serialize.js";
 import { live } from "./ir.js";
 import type { BuilderIR, BuilderNode } from "./ir.js";
-import { materializeNode } from "./macros.js";
+import { materializeNode, expandReviewLoop, expandCouncil, expandReviewFix } from "./macros.js";
+import type {
+  ReviewLoopOptions,
+  CouncilOptions,
+  ReviewFixOptions,
+  MacroExpansion,
+} from "./macros.js";
 
 // ─── WfOptions ────────────────────────────────────────────────────
 
@@ -122,6 +128,37 @@ export interface WorkflowBuilder {
    * @param opts.steps Child node ids or specs.
    */
   sequence(id: string, opts: { steps: (string | NodeSpec)[] }): WorkflowBuilder;
+
+  // ── Composite macros ─────────────────────────────────────────
+
+  /**
+   * Add a reviewLoop macro: worker runs, gate reviews, repeats until
+   * `acceptOn` (or `maxRounds`). The worker receives transcript-replay
+   * (D4) on subsequent iterations via the loop's resume mechanism.
+   *
+   * @param id   Unique id for the loop node.
+   * @param opts Worker, gate, maxRounds, optional acceptOn predicate.
+   */
+  reviewLoop(id: string, opts: ReviewLoopOptions): WorkflowBuilder;
+
+  /**
+   * Add a council macro: members run in parallel, then a synthesizer
+   * node consolidates their outputs into a single result.
+   *
+   * @param id   Base id for the council grouping.
+   * @param opts Members array + synthesize spec.
+   */
+  council(id: string, opts: CouncilOptions): WorkflowBuilder;
+
+  /**
+   * Add a reviewFix macro: reviewer identifies problems, fanOut spawns
+   * one fix worker per problem, results optionally merge into a single
+   * output.
+   *
+   * @param id   Base id for the reviewFix grouping.
+   * @param opts Reviewer, workers fn, optional merge spec.
+   */
+  reviewFix(id: string, opts: ReviewFixOptions): WorkflowBuilder;
 
   // ── Inline profiles ──────────────────────────────────────────
 
@@ -303,6 +340,25 @@ class WorkflowBuilderImpl implements WorkflowBuilder {
     };
   }
 
+  /** Splice a {@link MacroExpansion} into the builder state. */
+  private spliceExpansion(exp: MacroExpansion): void {
+    for (const node of exp.nodes) {
+      if (this.knownIds.has(node.id)) {
+        throw new Error(
+          `Macro expansion produced duplicate node id "${node.id}"; a node with this id already exists.`,
+        );
+      }
+      this.state.nodes.push(node);
+      this.knownIds.add(node.id);
+    }
+    for (const edge of exp.edges) {
+      this.state.edges.push(edge);
+    }
+    for (const condition of exp.conditions) {
+      this.state.conditions.push(condition);
+    }
+  }
+
   /** Throw if `id` is already registered as a node. */
   private assertUniqueId(id: string): void {
     if (this.knownIds.has(id)) {
@@ -476,6 +532,34 @@ class WorkflowBuilderImpl implements WorkflowBuilder {
     }
     this.addNode({ id, kind: "sequence", steps: [...steps] });
     for (const sid of steps) this.state.edges.push({ from: sid, to: id, kind: "dep" });
+    return this;
+  }
+
+  reviewLoop(id: string, opts: ReviewLoopOptions): WorkflowBuilder {
+    this.assertUniqueId(id);
+    // Validate worker/gate refs when they are string references.
+    if (typeof opts.worker === "string")
+      this.assertNodeExists(opts.worker, "reviewLoop worker", id);
+    if (typeof opts.gate === "string") this.assertNodeExists(opts.gate, "reviewLoop gate", id);
+    const exp = expandReviewLoop(id, opts);
+    this.spliceExpansion(exp);
+    return this;
+  }
+
+  council(id: string, opts: CouncilOptions): WorkflowBuilder {
+    this.assertUniqueId(id);
+    const exp = expandCouncil(id, opts);
+    this.spliceExpansion(exp);
+    return this;
+  }
+
+  reviewFix(id: string, opts: ReviewFixOptions): WorkflowBuilder {
+    this.assertUniqueId(id);
+    // Validate reviewer ref when it is a string reference.
+    if (typeof opts.reviewer === "string")
+      this.assertNodeExists(opts.reviewer, "reviewFix reviewer", id);
+    const exp = expandReviewFix(id, opts);
+    this.spliceExpansion(exp);
     return this;
   }
 

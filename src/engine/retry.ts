@@ -22,7 +22,7 @@ export interface RetryPolicy {
 }
 
 /** Reason codes for why a node was skipped. */
-export type SkipReason = "dep-failed" | "cond-not-taken" | "max-iterations" | "resume-skip";
+export type SkipReason = "dep-failed" | "cond-not-taken";
 
 /**
  * Named constant map for skip reasons.
@@ -31,8 +31,6 @@ export type SkipReason = "dep-failed" | "cond-not-taken" | "max-iterations" | "r
 export const SKIP_REASONS = {
   DEP_FAILED: "dep-failed",
   COND_NOT_TAKEN: "cond-not-taken",
-  MAX_ITERATIONS: "max-iterations",
-  RESUME_SKIP: "resume-skip",
 } as const;
 
 /**
