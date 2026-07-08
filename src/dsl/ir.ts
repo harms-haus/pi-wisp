@@ -8,7 +8,7 @@
 // is produced by `toIR()` and defined in `../types.js`.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import type { FnKind, IREdge, IRNode, IRNodeBase, NodeSpec } from "../types.js";
+import type { FnKind, IREdge, IRNodeBase, NodeSpec } from "../types.js";
 
 // ─── Builder IR (mutable in-memory shape during DSL construction) ──
 
@@ -28,9 +28,6 @@ export interface LiveFn {
 export function live(fn: (...args: never[]) => unknown, kind: LiveFn["kind"]): LiveFn {
   return { fn, kind };
 }
-
-/** Discriminator for builder-internal nodes (mirrors {@link IRNode}). */
-export type BuilderNodeKind = IRNode["kind"];
 
 /**
  * The builder-internal node shape. Identical in structure to {@link IRNode}
