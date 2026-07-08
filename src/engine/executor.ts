@@ -179,6 +179,35 @@ function validateNodeOutput(
   return { ok: false, error: `Schema validation failed: ${result.errors.join("; ")}` };
 }
 
+/**
+ * Idempotent handle to a held scheduler slot.
+ *
+ * `release()` decrements the slot's pools exactly once, regardless of how many
+ * times it is called. This lets {@link runNode} release unconditionally from a
+ * `finally` block on every exit (return, throw, abort) without tracking whether
+ * the slot was already released inline. After the slot is released mid-attempt
+ * (before a retry backoff) and re-acquired, a fresh handle guards the new hold.
+ */
+interface SlotHandle {
+  release(): void;
+}
+
+/**
+ * Wrap a slot the caller already holds in an idempotent {@link SlotHandle}.
+ * No acquisition happens here — the caller must hold the slot; this only makes
+ * release safe to call repeatedly (a no-op after the first call).
+ */
+function slotHandle(scheduler: Scheduler, schedulable: SchedulableNode): SlotHandle {
+  let released = false;
+  return {
+    release(): void {
+      if (released) return;
+      released = true;
+      scheduler.release(schedulable);
+    },
+  };
+}
+
 // ─── Main entry point ────────────────────────────────────────
 
 /**
@@ -372,12 +401,16 @@ export async function executeDAG(options: ExecuteDAGOptions): Promise<RunSummary
     const rt = runState.nodes.get(node.id);
     if (!rt) return;
     const policy = resolvePolicy(node, defaultRetries, retryBackoff);
-    let slotHeld = true; // acquired before runNode was called
+    // Idempotent handle around the slot acquired before runNode was called.
+    // `release()` is a no-op after the first call, so the finally block can
+    // release unconditionally on every exit. Re-armed (a fresh handle) after
+    // each successful retry re-acquire so the new hold is also covered.
+    let slot = slotHandle(scheduler, schedulable);
 
     try {
       for (;;) {
         // Aborted before/at the start of an attempt: the finally block releases
-        // the held slot (slotHeld is always true here).
+        // the held slot (the handle is still unreleased here).
         if (signal?.aborted) {
           failNode(node.id, rt, "aborted");
           return;
@@ -416,7 +449,7 @@ export async function executeDAG(options: ExecuteDAGOptions): Promise<RunSummary
           });
         } catch (err) {
           // Spawn / process error → non-retryable failure. The held slot is
-          // released by the finally block (slotHeld is still true here).
+          // released by the finally block (the handle is still unreleased here).
           failNode(node.id, rt, err instanceof Error ? err.message : String(err));
           return;
         }
@@ -428,9 +461,9 @@ export async function executeDAG(options: ExecuteDAGOptions): Promise<RunSummary
         }
 
         // Release the slot held for this attempt so other nodes may run while
-        // we validate / decide on a retry. (slotHeld is always true here.)
-        scheduler.release(schedulable);
-        slotHeld = false;
+        // we validate / decide on a retry. The handle is idempotent, so the
+        // finally block's release becomes a no-op if we exit without retrying.
+        slot.release();
 
         // Synthesize a `done` event when the stream lacks one (e.g. real pi
         // output, which emits message_complete but no done).
@@ -508,7 +541,7 @@ export async function executeDAG(options: ExecuteDAGOptions): Promise<RunSummary
                 failNode(node.id, rt, rt.error);
                 return;
               }
-              slotHeld = true;
+              slot = slotHandle(scheduler, schedulable); // re-arm for the new hold
               continue;
             }
             failNode(node.id, rt, rt.error);
@@ -535,7 +568,7 @@ export async function executeDAG(options: ExecuteDAGOptions): Promise<RunSummary
             failNode(node.id, rt, rt.error);
             return;
           }
-          slotHeld = true;
+          slot = slotHandle(scheduler, schedulable); // re-arm for the new hold
           continue;
         }
 
@@ -543,7 +576,7 @@ export async function executeDAG(options: ExecuteDAGOptions): Promise<RunSummary
         return;
       }
     } finally {
-      if (slotHeld) scheduler.release(schedulable);
+      slot.release();
     }
   }
 

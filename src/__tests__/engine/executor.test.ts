@@ -1367,3 +1367,256 @@ describe("robustness / integration gaps", () => {
     expect(b.startedAt).toBeGreaterThanOrEqual(a.endedAt!);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════════
+// Slot-release invariant — refactor safety net
+//
+// `runNode` borrows a scheduler slot (acquired in the main loop) and MUST
+// return it exactly once on every exit path: normal completion, adapter
+// throw, abort, retry exhaustion, and abort-during-retry-backoff. These tests
+// pin that invariant so a refactor of the slot-tracking (e.g. a `withSlot()`
+// helper or an idempotent release guard) cannot silently leak or double-release
+// a slot. The observable symptom of a leak is `scheduler.usage().global.used`
+// (and provider-pool `used`) remaining > 0 after `executeDAG` settles.
+// ══════════════════════════════════════════════════════════════════════
+
+describe("slot-release invariant (slots always released, even on error/abort paths)", () => {
+  /** Build a single-node IR with no edges. */
+  function singleNode(id: string, prompt = "Do work"): GraphIR {
+    return {
+      title: "slot-test",
+      slug: "slot-test",
+      options: {},
+      nodes: [{ id, kind: "node", profileRef: "default", prompt }],
+      edges: [],
+      conditions: [],
+      schemas: {},
+      primitives: {},
+    };
+  }
+
+  it("releases the global slot when the adapter throws during a run", async () => {
+    const ir = singleNode("throws");
+    const runState = makeRunState(ir);
+    const scheduler = createScheduler({ maxAgentConcurrency: 2 });
+
+    // emitEvents rejects → invokeAdapter rejects → runNode must capture it,
+    // fail the node, and release the held slot.
+    const throwingAdapter = createFakeAdapter({});
+    throwingAdapter.emitEvents = async (): Promise<void> => {
+      throw new Error("adapter exploded");
+    };
+
+    await withTimeout(executeDAG({ ir, runState, getAdapter: () => throwingAdapter, scheduler }));
+
+    expect(runState.nodes.get("throws")?.status).toBe("failed");
+    expect(runState.nodes.get("throws")?.error).toMatch(/adapter exploded/);
+    // The slot acquired for this node MUST be released back to the pool.
+    expect(scheduler.usage().global.used).toBe(0);
+  });
+
+  it("releases the slot when the adapter throws on a retry attempt (re-acquire path)", async () => {
+    // Exercises the retry re-acquire path: attempt 1 fails retryably (slot
+    // released + re-acquired for attempt 2), then attempt 2 throws. The
+    // re-acquired slot must still be released on the throw exit.
+    const ir: GraphIR = { ...singleNode("retry-throw"), options: { defaultRetries: 3 } };
+    const runState = makeRunState(ir);
+    const scheduler = createScheduler({ maxAgentConcurrency: 2 });
+
+    const adapter = createFakeAdapter({
+      events: (ctx?: NodeInvocationContext): NormalizedEvent[] => {
+        if ((ctx?.attempt ?? 1) <= 1) {
+          return [{ type: "error", message: "transient", retryable: true }];
+        }
+        throw new Error("explode on retry");
+      },
+    });
+
+    await withTimeout(
+      executeDAG({
+        ir,
+        runState,
+        getAdapter: () => adapter,
+        scheduler,
+        retryBackoffMs: 5,
+      }),
+    );
+
+    expect(runState.nodes.get("retry-throw")?.status).toBe("failed");
+    expect(runState.nodes.get("retry-throw")?.error).toMatch(/explode on retry/);
+    expect(runState.nodes.get("retry-throw")?.attempts).toBeGreaterThanOrEqual(2);
+    expect(scheduler.usage().global.used).toBe(0);
+  });
+
+  it("releases the slot when aborted during retry backoff", async () => {
+    // The node always fails retryably (fast), then enters the backoff sleep
+    // with the slot already released. Aborting during the backoff must still
+    // leave the pool at zero used after executeDAG settles (no hang, no leak).
+    const ir: GraphIR = { ...singleNode("backoff-abort"), options: { defaultRetries: 5 } };
+    const runState = makeRunState(ir);
+    const scheduler = createScheduler({ maxAgentConcurrency: 2 });
+
+    const adapter = createFakeAdapter({
+      mode: "retryable-error",
+      errorMessage: "transient",
+    });
+
+    const controller = new AbortController();
+    const execPromise = executeDAG({
+      ir,
+      runState,
+      getAdapter: () => adapter,
+      scheduler,
+      signal: controller.signal,
+      retryBackoffMs: 120,
+    });
+
+    // Abort during the first backoff sleep (well before the 120ms backoff ends).
+    setTimeout(() => {
+      controller.abort();
+    }, 25);
+
+    await withTimeout(execPromise, 4000);
+
+    expect(runState.nodes.get("backoff-abort")?.status).toBe("failed");
+    // No slot held after settling.
+    expect(scheduler.usage().global.used).toBe(0);
+  });
+
+  it("releases the slot when aborted mid-run (in-flight node)", async () => {
+    const ir = singleNode("midrun-abort");
+    const runState = makeRunState(ir);
+    const scheduler = createScheduler({ maxAgentConcurrency: 2 });
+
+    const adapter = createFakeAdapter({
+      sessionId: "midrun-sess",
+      finalText: "partial",
+      durationMs: 200,
+      delayMs: 10,
+    });
+
+    const controller = new AbortController();
+    const execPromise = executeDAG({
+      ir,
+      runState,
+      getAdapter: () => adapter,
+      scheduler,
+      signal: controller.signal,
+    });
+
+    setTimeout(() => {
+      controller.abort();
+    }, 5);
+    await withTimeout(execPromise, 4000);
+
+    expect(runState.nodes.get("midrun-abort")?.status).toBe("failed");
+    expect(scheduler.usage().global.used).toBe(0);
+  });
+
+  it("releases provider-pool slots when a node fails (non-retryable)", async () => {
+    const ir: GraphIR = { ...singleNode("pfail"), options: { defaultRetries: 0 } };
+    const runState = makeRunState(ir);
+    const scheduler = createScheduler({
+      maxAgentConcurrency: 2,
+      limits: { byProvider: { zai: 1 } },
+    });
+
+    const failAdapter = createFakeAdapter({
+      mode: "retryable-error",
+      errorMessage: "boom",
+    });
+
+    await withTimeout(
+      executeDAG({
+        ir,
+        runState,
+        getAdapter: () => failAdapter,
+        scheduler,
+        profiles: { inlineProfiles: { default: { provider: "zai" } } },
+        retryBackoffMs: 5,
+      }),
+    );
+
+    expect(runState.nodes.get("pfail")?.status).toBe("failed");
+    // Both the global pool AND the zai provider pool must be back to zero.
+    expect(scheduler.usage().global.used).toBe(0);
+    expect(scheduler.usage().byProvider.zai?.used ?? 0).toBe(0);
+  });
+
+  it("a failed node's released slot lets a queued node run afterwards", async () => {
+    // End-to-end leak detector: global concurrency = 1. n1 fails (non-retryable).
+    // If n1 leaks its slot, n2 can never acquire and stays "ready" forever and
+    // the global pool shows used=1. With correct release, n2 runs and completes.
+    const ir: GraphIR = {
+      title: "leak-detector",
+      slug: "leak-detector",
+      options: { defaultRetries: 0 },
+      nodes: [
+        { id: "n1", kind: "node", profileRef: "default", prompt: "fails" },
+        { id: "n2", kind: "node", profileRef: "default", prompt: "succeeds" },
+      ],
+      edges: [],
+      conditions: [],
+      schemas: {},
+      primitives: {},
+    };
+    const runState = makeRunState(ir);
+    const scheduler = createScheduler({ maxAgentConcurrency: 1 });
+
+    const failAdapter = createFakeAdapter({
+      mode: "fail-after-events",
+      failAfterEvents: 0,
+      errorMessage: "n1 failed",
+    });
+    const okAdapter = makeDefaultAdapter({ durationMs: 2 });
+
+    const getAdapter = (_type?: string, nodeId?: string): AgentAdapter => {
+      if (nodeId === "n1") return failAdapter;
+      return okAdapter;
+    };
+
+    await withTimeout(
+      executeDAG({
+        ir,
+        runState,
+        getAdapter: getAdapter as any,
+        scheduler,
+      }),
+    );
+
+    expect(runState.nodes.get("n1")?.status).toBe("failed");
+    // n2 must have run (it could only acquire the single global slot once n1
+    // released it). A leak would leave n2 stuck in "ready".
+    expect(runState.nodes.get("n2")?.status).toBe("completed");
+    expect(scheduler.usage().global.used).toBe(0);
+  });
+
+  it("leaves all pools fully released after a multi-node run under tight concurrency", async () => {
+    // Three independent nodes serialised by a global cap of 1 → three full
+    // acquire/release cycles. A per-cycle imbalance would leave used > 0.
+    const ir: GraphIR = {
+      title: "multi",
+      slug: "multi",
+      options: {},
+      nodes: [
+        { id: "n1", kind: "node", profileRef: "default", prompt: "1" },
+        { id: "n2", kind: "node", profileRef: "default", prompt: "2" },
+        { id: "n3", kind: "node", profileRef: "default", prompt: "3" },
+      ],
+      edges: [],
+      conditions: [],
+      schemas: {},
+      primitives: {},
+    };
+    const runState = makeRunState(ir);
+    const scheduler = createScheduler({ maxAgentConcurrency: 1 });
+    const adapter = makeDefaultAdapter({ durationMs: 5 });
+
+    await withTimeout(executeDAG({ ir, runState, getAdapter: () => adapter, scheduler }));
+
+    expect(runState.nodes.get("n1")?.status).toBe("completed");
+    expect(runState.nodes.get("n2")?.status).toBe("completed");
+    expect(runState.nodes.get("n3")?.status).toBe("completed");
+    expect(scheduler.usage().global.used).toBe(0);
+  });
+});
