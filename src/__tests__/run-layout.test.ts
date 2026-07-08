@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { createRunDir, copyWorkflowArtifact, writeGraph } from "../run/layout.js";
+import { verifyBytes } from "../run/integrity.js";
 import type { GraphIR } from "../types.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────
@@ -147,6 +148,13 @@ describe("writeGraph", () => {
     expect(parsed.title).toBe("Test Graph");
     expect(parsed.nodes).toHaveLength(1);
     expect(parsed.nodes[0]?.id).toBe("a");
+
+    // writeGraph also signs the graph; the signature must be present and valid.
+    const sigPath = join(runDir, "artifacts", "graph.json.sig");
+    expect(existsSync(sigPath)).toBe(true);
+    expect(
+      verifyBytes(readFileSync(graphPath, "utf-8"), readFileSync(sigPath, "utf-8").trim()),
+    ).toBe(true);
   });
 
   it("the written JSON is valid and can be re-parsed", () => {

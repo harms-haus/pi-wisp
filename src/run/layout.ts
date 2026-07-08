@@ -11,10 +11,12 @@ import { join } from "node:path";
 import type { GraphIR } from "../types.js";
 import {
   RUN_GRAPH_FILE,
+  RUN_GRAPH_SIG_FILE,
   RUN_PROFILES_SUBDIR,
   RUN_SESSIONS_DIR,
   RUN_WORKFLOW_FILE,
 } from "../constants.js";
+import { signBytes } from "./integrity.js";
 import { kebabCase, timecode } from "../utils.js";
 
 /**
@@ -47,8 +49,13 @@ export function copyWorkflowArtifact(src: string, runDir: string): void {
 }
 
 /**
- * Write the compiled graph IR as `artifacts/graph.json` (pretty-printed).
+ * Write the compiled graph IR as `artifacts/graph.json` (pretty-printed) plus an
+ * HMAC signature at `artifacts/graph.json.sig`. The signature lets `prepareResume`
+ * reject a tampered `graph.json` whose `FnDescriptor.src` would otherwise be
+ * rehydrated (executed) on the host.
  */
 export function writeGraph(runDir: string, ir: GraphIR): void {
-  writeFileSync(join(runDir, RUN_GRAPH_FILE), JSON.stringify(ir, null, 2), "utf-8");
+  const json = JSON.stringify(ir, null, 2);
+  writeFileSync(join(runDir, RUN_GRAPH_FILE), json, "utf-8");
+  writeFileSync(join(runDir, RUN_GRAPH_SIG_FILE), signBytes(json), "utf-8");
 }

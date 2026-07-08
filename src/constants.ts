@@ -27,6 +27,9 @@ export const RUN_WORKFLOW_FILE = join(RUN_ARTIFACTS_DIR, "workflow.ts");
 /** File path (relative to a run dir) of the serialized graph IR. */
 export const RUN_GRAPH_FILE = join(RUN_ARTIFACTS_DIR, "graph.json");
 
+/** File path (relative to a run dir) of the HMAC signature over `graph.json`. */
+export const RUN_GRAPH_SIG_FILE = join(RUN_ARTIFACTS_DIR, "graph.json.sig");
+
 /** Directory name for sessions inside a run directory. */
 export const RUN_SESSIONS_DIR = "sessions";
 

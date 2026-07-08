@@ -40,6 +40,7 @@ afterEach(() => {
 
 import type { GraphIR, IREdge, IRNode } from "../../types.js";
 import { prepareResume } from "../../engine/resume.js";
+import { writeGraph } from "../../run/layout.js";
 import { executeDAG } from "../../engine/executor.js";
 import { createScheduler } from "../../engine/scheduler.js";
 import { createFakeAdapter } from "../helpers/fake-adapter.js";
@@ -102,7 +103,7 @@ function buildFixtureRunDir(): string {
     primitives: {},
   };
 
-  writeFileSync(join(artifactsDir, "graph.json"), JSON.stringify(graph, null, 2));
+  writeGraph(runDir, graph);
 
   const runJson = {
     runId: "run-resume-exec",

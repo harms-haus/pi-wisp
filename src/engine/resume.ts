@@ -26,8 +26,9 @@ import type { GraphIR, NodeRuntime, NodeState, RunState } from "../types.js";
 
 import type { TSchema } from "typebox";
 
-import { RUN_GRAPH_FILE } from "../constants.js";
+import { RUN_GRAPH_FILE, RUN_GRAPH_SIG_FILE } from "../constants.js";
 import { readSession } from "../run/sessions.js";
+import { verifyBytes } from "../run/integrity.js";
 import { validateOutputAgainstSchema } from "../dsl/fn-serialize.js";
 
 // ─── Public types ─────────────────────────────────────────────────
@@ -178,6 +179,27 @@ function freshSessionId(): string {
   return `sess-${randomUUID().slice(0, 8)}`;
 }
 
+/**
+ * Verify the HMAC signature over the on-disk graph bytes before they are
+ * trusted on resume (graph.json is a distinct trust boundary; its
+ * FnDescriptor.src is rehydrated via new Function). Throws if the signature is
+ * missing or does not verify.
+ */
+function assertGraphIntegrity(runDir: string, graphRaw: string): void {
+  const sigPath = join(runDir, RUN_GRAPH_SIG_FILE);
+  if (!existsSync(sigPath)) {
+    throw new Error(
+      `prepareResume: graph signature not found at "${sigPath}". Refusing to resume unsigned graph IR.`,
+    );
+  }
+  const signature = readFileSync(sigPath, "utf-8").trim();
+  if (!verifyBytes(graphRaw, signature)) {
+    throw new Error(
+      "prepareResume: graph IR signature verification failed. Refusing to resume tampered graph IR.",
+    );
+  }
+}
+
 // ─── Main entry point ────────────────────────────────────────────
 
 /**
@@ -199,6 +221,10 @@ export function prepareResume(runDir: string): PrepareResumeResult {
     throw new Error(`prepareResume: graph IR not found at "${graphPath}". Cannot resume.`);
   }
   const graphRaw = readFileSync(graphPath, "utf-8");
+  // Integrity-check the on-disk IR (HMAC over graph.json) before trusting it on
+  // resume — graph.json is a distinct trust boundary whose FnDescriptor.src is
+  // rehydrated via new Function.
+  assertGraphIntegrity(runDir, graphRaw);
   let ir: GraphIR;
   try {
     ir = JSON.parse(graphRaw) as GraphIR;

@@ -38,6 +38,7 @@ afterEach(() => {
 
 import type { GraphIR, IREdge, IRNode } from "../../types.js";
 import { prepareResume } from "../../engine/resume.js";
+import { writeGraph } from "../../run/layout.js";
 
 // ══════════════════════════════════════════════════════════════════════
 // Fixture builder
@@ -112,7 +113,7 @@ function buildFixtureRunDir(): {
     primitives: {},
   };
 
-  writeFileSync(join(artifactsDir, "graph.json"), JSON.stringify(graph, null, 2));
+  writeGraph(runDir, graph);
 
   // ── run.json (manifest) ──────────────────────────────────
   // Simulates a run where A completed, B failed, C pending.

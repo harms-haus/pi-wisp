@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { Value } from "typebox/value";
 
 import { runWorkflowTool, RunWorkflowParams } from "../../tools/run-workflow.js";
+import { signBytes } from "../../run/integrity.js";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -270,7 +271,9 @@ describe("run_workflow — execute", () => {
       schemas: {},
       primitives: {},
     };
-    writeFileSync(join(artifactsDir, "graph.json"), JSON.stringify(graph, null, 2));
+    const graphJson = JSON.stringify(graph, null, 2);
+    writeFileSync(join(artifactsDir, "graph.json"), graphJson);
+    writeFileSync(join(artifactsDir, "graph.json.sig"), signBytes(graphJson));
 
     // Write run.json: node A completed, node B failed
     const runJson = {

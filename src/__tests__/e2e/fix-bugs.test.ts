@@ -27,6 +27,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, writeFileSync, existsSync, readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { signBytes } from "../../run/integrity.js";
 
 // ── Module under test ────────────────────────────────────────────────
 import { runWorkflowTool } from "../../tools/run-workflow.js";
@@ -338,7 +339,9 @@ testOrSkip("run_workflow E2E — real pi subprocess (WISP_E2E=1)", () => {
       schemas: {},
       primitives: {},
     };
-    writeFileSync(join(artifactsDir, "graph.json"), JSON.stringify(graph, null, 2));
+    const graphJson = JSON.stringify(graph, null, 2);
+    writeFileSync(join(artifactsDir, "graph.json"), graphJson);
+    writeFileSync(join(artifactsDir, "graph.json.sig"), signBytes(graphJson));
 
     // Write run.json: A completed, B failed
     const runJson = {
