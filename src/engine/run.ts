@@ -27,7 +27,7 @@ import type {
   RunStatus,
   WispError,
 } from "../types.js";
-import type { RunSummary } from "./executor.js";
+import type { RunSummary } from "./events.js";
 import { compileWorkflow } from "../dsl/compile.js";
 import { SKIP_REASONS } from "./retry.js";
 import { validateIR } from "../dsl/ir.js";

@@ -118,9 +118,6 @@ export interface ExecuteDAGOptions {
   audit?: AuditLogger;
 }
 
-// Re-export shared types from events.ts for backward compatibility.
-export type { RunSummaryNode, RunSummaryTotals, RunSummary } from "./events.js";
-
 /** Coalesce rapid `onUpdate` calls into a single TUI re-render. */
 const UPDATE_DEBOUNCE_MS = 50;
 

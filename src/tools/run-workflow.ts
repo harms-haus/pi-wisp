@@ -15,7 +15,7 @@ import { join } from "node:path";
 
 import type { IREdge, PoolUsage, RunState, ValidationError, WispError } from "../types.js";
 import type { RunSuccess, RunFailure } from "../engine/run.js";
-import type { RunSummaryNode } from "../engine/executor.js";
+import type { RunSummaryNode } from "../engine/events.js";
 import { compileWorkflow } from "../dsl/compile.js";
 import { runWorkflow } from "../engine/run.js";
 import { prepareResume } from "../engine/resume.js";

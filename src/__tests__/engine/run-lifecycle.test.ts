@@ -134,7 +134,7 @@ import { executeDAG } from "../../engine/executor.js";
 // ── Types used across tests ────────────────────────────────────────
 
 import type { GraphIR, IRNode, IREdge, WispError } from "../../types.js";
-import type { RunSummary } from "../../engine/executor.js";
+import type { RunSummary } from "../../engine/events.js";
 import type { AgentAdapter } from "../../adapters/types.js";
 
 // ══════════════════════════════════════════════════════════════════════
