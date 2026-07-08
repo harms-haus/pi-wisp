@@ -42,7 +42,6 @@ import type { AgentAdapter } from "../adapters/types.js";
 import type { AuditLogger } from "../run/audit.js";
 import type { Scheduler, SchedulableNode } from "./scheduler.js";
 import type {
-  FnDescriptor,
   GraphIR,
   IRNode,
   NodeRuntime,
@@ -180,28 +179,6 @@ function validateNodeOutput(
   return { ok: false, error: `Schema validation failed: ${result.errors.join("; ")}` };
 }
 
-/**
- * Type guard: is the each-fn result a plain object (a NodeSpec)?
- *
- * Used to narrow the `unknown` each-fn result without a type assertion (which
- * `@typescript-eslint/no-unnecessary-type-assertion` would flag for object-ish
- * casts).
- */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && value !== undefined && typeof value === "object";
-}
-
-/**
- * Rehydrate and invoke an `each` fn with a single item (fanOut expansion).
- *
- * Unlike {@link rehydrateFn} (which calls `(ctx)`), the each fn is called as
- * `(item)`. The same shadowed-global guardrail applies: every shadowable global
- * is bound to `undefined` so accidental Node API use throws at call-time.
- */
-function rehydrateEachFn(desc: FnDescriptor, item: unknown): unknown {
-  return rehydrateArity(desc, ["item"], [item]);
-}
-
 // ─── Main entry point ────────────────────────────────────────
 
 /**
@@ -330,8 +307,10 @@ export async function executeDAG(options: ExecuteDAGOptions): Promise<RunSummary
       const childId = `${node.id}-${i}`;
       let spec: Partial<NodeSpec> | null = null;
       try {
-        const result: unknown = rehydrateEachFn(node.eachFnRef, items[i]);
-        if (isPlainObject(result)) spec = result;
+        const result: unknown = rehydrateArity(node.eachFnRef, ["item"], [items[i]]);
+        if (result !== null && result !== undefined && typeof result === "object") {
+          spec = result;
+        }
       } catch {
         spec = null;
       }
