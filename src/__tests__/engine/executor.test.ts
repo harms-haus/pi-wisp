@@ -1260,8 +1260,7 @@ describe("robustness / integration gaps", () => {
     await withTimeout(executeDAG({ ir, runState, getAdapter: () => realAdapter, scheduler }));
 
     const rt = runState.nodes.get("crash")!;
-    // The executor currently discards exitCode → marks completed (BUG).
-    // After the fix, the node must be FAILED with stderr folded into error.
+    // Executor correctly maps non-zero exitCode to FAILED status with stderr folded into error.
     expect(rt.status).toBe("failed");
     expect(rt.error).toContain("oom-killed");
   });
@@ -1316,10 +1315,8 @@ describe("robustness / integration gaps", () => {
   it("only one node runs at a time when provider pool limit (zai=1) is configured", async () => {
     // Two independent nodes (no deps). Both would resolve to provider 'zai'.
     // The scheduler is configured with limits.byProvider.zai = 1.
-    // The executor MUST populate SchedulableNode.provider from the resolved
-    // profile so the scheduler can enforce the provider-level pool.  Currently
-    // RED — executor only sets agentType → provider pool never checked → both
-    // nodes run concurrently.
+    // Executor populates SchedulableNode.provider from the resolved profile so the scheduler
+    // can enforce the provider-level pool.
     const ir: GraphIR = {
       title: "provider-pool",
       slug: "provider-pool",
@@ -1366,10 +1363,7 @@ describe("robustness / integration gaps", () => {
     expect(a.status).toBe("completed");
     expect(b.status).toBe("completed");
 
-    // With provider-pool enforcement, B must have started only after A
-    // completed.  Currently RED: executor never sets SchedulableNode.provider
-    // → scheduler ignores the provider pool → both run concurrently → B
-    // starts before A finishes → this assertion FAILS.
+    // With provider-pool enforcement, B must have started only after A completed.
     expect(b.startedAt).toBeGreaterThanOrEqual(a.endedAt!);
   });
 });
