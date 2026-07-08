@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Test coverage
+coverage/
+
+# Test artifacts & leaked temp dirs (mkdtemp fixtures should never be committed)
+wisp-resume-*/
+wisp-resume-spike-*/
+wisp-resume-test-*/
+
+# pi-wisp runtime artifacts (run output / sessions). Project config
+# (.wisp/config.json) is intentionally NOT ignored.
+.wisp/runs/
+.wisp/sessions/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
