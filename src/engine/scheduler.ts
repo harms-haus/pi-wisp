@@ -99,8 +99,7 @@ export function createScheduler(
     if (node.model === undefined) return undefined;
     const composite = node.provider !== undefined ? `${node.provider}/${node.model}` : undefined;
     if (composite !== undefined && modelLimits[composite] !== undefined) return composite;
-    if (modelLimits[node.model] !== undefined) return node.model;
-    return undefined;
+    return modelLimits[node.model] !== undefined ? node.model : undefined;
   }
   function poolFor(
     record: PoolRecord,
@@ -161,6 +160,7 @@ export function createScheduler(
           resolve(false);
         };
         entry.onAbort = onAbort;
+        entry.signal = signal;
         signal.addEventListener("abort", onAbort, { once: true });
         if (signal.aborted) {
           signal.removeEventListener("abort", onAbort);

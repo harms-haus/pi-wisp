@@ -9,7 +9,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 import { MAX_MESSAGES_PER_SESSION, RUN_SESSIONS_DIR } from "../constants.js";
 
@@ -58,7 +58,19 @@ export function writeSession(runDir: string, session: PersistedSession): void {
  *          truncated sessions).
  */
 export function readSession(runDir: string, sessionId: string): PersistedSession | undefined {
-  const filePath = join(runDir, RUN_SESSIONS_DIR, `${sessionId}.json`);
+  const sessionsDir = resolve(join(runDir, RUN_SESSIONS_DIR));
+  const filePath = resolve(join(sessionsDir, `${sessionId}.json`));
+  // Confine the file strictly inside sessionsDir. `sessionId` is read from the
+  // on-disk run manifest on resume, so a compromised run dir could supply a
+  // traversal id (e.g. "../../sensitive"); reject any escape (via "..", an
+  // absolute path, or pointing at the directory itself).
+  const rel = relative(sessionsDir, filePath);
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
+    console.warn(
+      `[wisp] readSession: refusing sessionId outside sessions directory: ${JSON.stringify(sessionId)}`,
+    );
+    return undefined;
+  }
   if (!existsSync(filePath)) return undefined;
   const raw = readFileSync(filePath, "utf-8");
   try {

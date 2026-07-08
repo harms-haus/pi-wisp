@@ -49,7 +49,7 @@ function projectRoot(): string {
 }
 
 /** Return true when `cwd` resolves to a path inside the project root. */
-function isCwdWithinRoot(cwd: string): boolean {
+export function isCwdWithinRoot(cwd: string): boolean {
   const root = projectRoot();
   const resolvedTarget = resolve(cwd);
   let canonical: string;

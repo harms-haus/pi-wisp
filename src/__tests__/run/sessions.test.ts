@@ -186,6 +186,23 @@ describe("readSession", () => {
     expect(result).toBeUndefined();
   });
 
+  it("returns undefined for a path-traversal sessionId without reading outside the sessions dir", () => {
+    const session = makeSession({
+      sessionId: "sess-real",
+      finalText: "real content",
+    });
+    writeSession(tmpDir, session);
+
+    // A traversal id must not escape the sessions directory.
+    const traversal = readSession(tmpDir, "../../etc/passwd");
+    expect(traversal).toBeUndefined();
+
+    // The legitimate session is still readable.
+    const legit = readSession(tmpDir, "sess-real");
+    expect(legit).toBeDefined();
+    expect(legit!.finalText).toBe("real content");
+  });
+
   it("round-trips a session with full metadata", () => {
     const original = makeSession({
       sessionId: "roundtrip-001",

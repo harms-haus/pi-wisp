@@ -192,6 +192,56 @@ describe("profileToArgs — extraArgs security validation", () => {
   });
 
   // ═════════════════════════════════════════════════════════════════
+  // D3 CRITICAL: --api-key must NEVER be forwarded via extraArgs
+  // ═════════════════════════════════════════════════════════════════
+
+  it("D3: rejects extraArgs '--api-key' (space form) unconditionally", () => {
+    // EXPECTED CONTRACT (D3 / DECISIONS.md):
+    //   The extraArgs escape hatch must NEVER forward --api-key, regardless
+    //   of any profile restrictions. A space-form token "--api-key"
+    //   followed by a value is refused outright.
+    const profile: WispProfile = {
+      extraArgs: ["--api-key", "sk-xxx"],
+    };
+
+    expect(() => profileToArgs(profile)).toThrow(/api-key/i);
+  });
+
+  it("D3: rejects extraArgs '--api-key=<value>' (equals form) unconditionally", () => {
+    // EXPECTED CONTRACT (D3 / DECISIONS.md):
+    //   The equals form --api-key=sk-xxx is likewise refused, so credentials
+    //   cannot slip through via the single-token form.
+    const profile: WispProfile = {
+      extraArgs: ["--api-key=sk-xxx"],
+    };
+
+    expect(() => profileToArgs(profile)).toThrow(/api-key/i);
+  });
+
+  it("D3: rejects --api-key via extraArgs even with no other restrictions active", () => {
+    // EXPECTED CONTRACT (D3 / DECISIONS.md):
+    //   The --api-key block is UNCONDITIONAL — it applies even for a profile
+    //   with no tool/extension/skill/context-files restrictions at all.
+    const profile: WispProfile = {
+      extraArgs: ["--verbose", "--api-key", "sk-secret"],
+    };
+
+    expect(() => profileToArgs(profile)).toThrow(/api-key/i);
+  });
+
+  it("still forwards a benign extraArg unchanged", () => {
+    // EXPECTED CONTRACT:
+    //   A non-credential, non-override extraArg survives validation and is
+    //   pushed verbatim onto the args array.
+    const profile: WispProfile = {
+      extraArgs: ["--verbose"],
+    };
+
+    const result = profileToArgs(profile);
+    expect(result.args).toContain("--verbose");
+  });
+
+  // ═════════════════════════════════════════════════════════════════
   // Extension / skill override-guard
   // ═════════════════════════════════════════════════════════════════
 

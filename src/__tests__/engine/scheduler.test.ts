@@ -7,7 +7,7 @@
 //
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { createScheduler, type SchedulableNode } from "../../engine/scheduler.js";
 import type { PoolUsage, WispConfig } from "../../types.js";
 import { CONFIG_DEFAULTS } from "../../constants.js";
@@ -1107,5 +1107,67 @@ describe("acquire() — abort-during-registration leaves no stale waiter", () =>
     const fresh = scheduler.acquire(n);
     expect(await fresh).toBe(true);
     expect(scheduler.usage().global.used).toBe(1);
+  });
+});
+
+// ─── Listener cleanup on the normal wake path ─────────────────
+//
+// acquire() arms an `abort` listener on the caller's AbortSignal and stores it
+// on the waiter entry. When a queued waiter is woken by release() (the normal,
+// non-abort path), wakeFirstCompatibleWaiter must detach that listener:
+//
+//   if (entry.signal && entry.onAbort) entry.signal.removeEventListener("abort", entry.onAbort);
+//
+// The guard requires entry.signal to be set. If acquire() never assigns
+// entry.signal, the guard is always false and the listener leaks on EVERY
+// contended-then-woken acquire. Since the signal is a long-lived run signal,
+// Node eventually emits MaxListenersExceededWarning. This test pins the fix:
+// the listener is removed when the waiter is woken normally.
+
+describe("acquire() — removes the abort listener on the normal wake path", () => {
+  it("detaches the abort listener when release() wakes a queued waiter", async () => {
+    // Global cap of 1: node A fills the pool, node B must queue.
+    const scheduler = createScheduler(config({ maxAgentConcurrency: 1 }));
+
+    // Node A claims the only slot — resolves immediately, never queues.
+    const nodeA = node();
+    expect(scheduler.tryAcquire(nodeA)).toBe(true);
+
+    // Node B is a distinct, compatible object (both contend only for global
+    // since no per-type limits are configured). It must queue while A holds the
+    // slot.
+    const nodeB = node({ model: "claude-opus-4-20250514" });
+
+    const controller = new AbortController();
+    // Spy BEFORE the waiter is registered so we can (a) capture the exact
+    // onAbort handler the scheduler arms and (b) observe whether it is removed
+    // on wake. vi.spyOn calls through to the real implementation, so the
+    // listener is actually registered on the EventTarget.
+    const addSpy = vi.spyOn(controller.signal, "addEventListener");
+    const removeSpy = vi.spyOn(controller.signal, "removeEventListener");
+
+    // B queues: tryAcquire fails (pool full), not aborted, so the executor
+    // runs synchronously and arms the abort listener before acquire() returns.
+    const acquireB = scheduler.acquire(nodeB, controller.signal);
+
+    // The scheduler armed exactly one `abort` listener; capture its reference.
+    expect(addSpy).toHaveBeenCalledTimes(1);
+    expect(addSpy).toHaveBeenCalledWith("abort", expect.any(Function), { once: true });
+    const onAbort = addSpy.mock.calls[0]![1] as () => void;
+
+    // Nothing removed yet — the waiter is still queued.
+    expect(removeSpy).not.toHaveBeenCalled();
+
+    // Free node A's slot → release() wakes B (FIFO, compatible). B resolves true.
+    scheduler.release(nodeA);
+    await expect(acquireB).resolves.toBe(true);
+
+    // On the normal wake path, wakeFirstCompatibleWaiter must detach the abort
+    // listener. BUGGY (entry.signal never assigned): the cleanup guard is
+    // always false → removeEventListener is never called → the listener leaks.
+    expect(removeSpy).toHaveBeenCalledWith("abort", onAbort);
+
+    addSpy.mockRestore();
+    removeSpy.mockRestore();
   });
 });

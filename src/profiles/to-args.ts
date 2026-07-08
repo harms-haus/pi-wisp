@@ -87,6 +87,11 @@ function isContextFilesRelatedFlag(arg: string): boolean {
   return flagMatches(arg, NO_CONTEXT_FILES_FLAGS);
 }
 
+/** Credential flags that must NEVER be forwarded (D3 invariant). */
+function isApiKeyFlag(arg: string): boolean {
+  return arg === "--api-key" || arg.startsWith("--api-key=");
+}
+
 /**
  * Whether `arg` must be refused given the profile's active restrictions:
  *   - tool flags when any tool restriction is active;
@@ -189,7 +194,28 @@ function pushSkillArgs(
 }
 
 /**
+ * Validate the value of a surviving `--skill`/`--extension` flag: reject null
+ * bytes and shell-unsafe content, require path-containment within an allowed
+ * directory, and report whether the value came from the following array
+ * element (space form, consuming the next token).
+ */
+function validateValueFlag(matched: MatchedValue, safeDirs: string[]): boolean {
+  const val = matched.value;
+  if (val.includes("\0")) {
+    throw new Error("Invalid extraArg value: contains null byte");
+  }
+  if (SHELL_UNSAFE.test(val)) {
+    throw new Error(`Refusing extraArg: potentially unsafe argument '${val.slice(0, 40)}'`);
+  }
+  if (safeDirs.length === 0 || !safeDirs.some((d) => isWithinDir(val, d))) {
+    throw new Error(`Refusing ${matched.kind} path outside allowed directories: ${val}`);
+  }
+  return matched.consumedNext;
+}
+
+/**
  * Validate and push `extraArgs`, enforcing the override-guard security policy:
+ *   - credential flags (`--api-key`) blocked UNCONDITIONALLY (D3 invariant);
  *   - capability-override flags blocked when the matching restriction is active;
  *   - `--skill`/`--extension` values path-contained to cwd / agentDir (and
  *     refused outright when no allowed dir is configured, since containment
@@ -214,6 +240,13 @@ function pushExtraArgs(
     const arg = extra[i];
     if (arg === undefined) continue;
 
+    // D3 invariant: wisp must NEVER forward credentials, regardless of any
+    // profile restrictions. Block --api-key (space and equals forms) outright.
+    if (isApiKeyFlag(arg)) {
+      throw new Error(
+        "Refusing extraArg '--api-key': wisp must not forward credentials (D3). Use the host environment's persisted auth instead.",
+      );
+    }
     if (arg.includes("\0")) {
       throw new Error("Invalid extraArg: contains null byte");
     }
@@ -229,17 +262,7 @@ function pushExtraArgs(
     // Path-containment check for any surviving --skill / --extension value.
     const matched = matchValueFlag(arg, extra[i + 1]);
     if (matched) {
-      const val = matched.value;
-      if (val.includes("\0")) {
-        throw new Error("Invalid extraArg value: contains null byte");
-      }
-      if (SHELL_UNSAFE.test(val)) {
-        throw new Error(`Refusing extraArg: potentially unsafe argument '${val.slice(0, 40)}'`);
-      }
-      if (safeDirs.length === 0 || !safeDirs.some((d) => isWithinDir(val, d))) {
-        throw new Error(`Refusing ${matched.kind} path outside allowed directories: ${val}`);
-      }
-      if (matched.consumedNext) {
+      if (validateValueFlag(matched, safeDirs)) {
         i++;
       }
     }

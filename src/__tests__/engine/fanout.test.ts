@@ -21,7 +21,7 @@
  * RED today because `src/engine/fanout.ts` does not exist.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 import { expandFanOut } from "../../engine/fanout.js";
 
@@ -174,7 +174,7 @@ describe("expandFanOut", () => {
       "expand",
       fn('(ctx) => ctx.output("producer").items', "iterate"),
       fn(
-        '(item) => ({ agentType: "codex", profileRef: "p1", prompt: "x", outputSchema: { type: "string" }, dependsOn: ["expand"], stage: "fix", retries: 7, timeoutSec: 30, cwd: "/tmp" })',
+        '(item) => ({ agentType: "codex", profileRef: "p1", prompt: "x", outputSchema: { type: "string" }, dependsOn: ["expand"], stage: "fix", retries: 7, timeoutSec: 30, cwd: "/home/user/project" })',
         "each",
       ),
     );
@@ -192,7 +192,7 @@ describe("expandFanOut", () => {
     expect(child.stage).toBe("fix");
     expect(child.retries).toBe(7);
     expect(child.timeoutSec).toBe(30);
-    expect(child.cwd).toBe("/tmp");
+    expect(child.cwd).toBe("/home/user/project");
   });
 
   it("defaults profileRef to 'default' when the each fn omits it", () => {
@@ -328,5 +328,32 @@ describe("expandFanOut", () => {
     expect(rt?.status).toBe("pending");
     expect(rt?.attempts).toBe(0);
     expect(ctx.runState.nodes.size).toBe(3); // producer + expand + expand-0
+  });
+
+  it("skips a child whose cwd escapes the project root, but keeps a safe sibling", () => {
+    const ir = fanOutIR(
+      "producer",
+      "expand",
+      fn('(ctx) => ctx.output("producer").items', "iterate"),
+      // index 0 → escaping cwd (/etc); index 1 → safe cwd (undefined → skipped guard).
+      fn('(item) => item === "bad" ? ({ prompt: "x", cwd: "/etc" }) : ({ prompt: "y" })', "each"),
+    );
+    const ctx = ctxFor(ir);
+    complete(ctx.runState, "producer", { items: ["bad", "good"] });
+
+    // Suppress the expected console.warn so the test output stays clean.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    expandFanOut(ctx, ctx.nodeMap.get("expand")!);
+
+    // The escaping child (index 0) was skipped.
+    expect(ctx.nodeMap.has("expand-0")).toBe(false);
+    expect(ctx.runState.nodes.has("expand-0")).toBe(false);
+    // The safe sibling (index 1) was still expanded.
+    expect(ctx.nodeMap.has("expand-1")).toBe(true);
+    expect(asNodeChild(ctx.nodeMap.get("expand-1")).prompt).toBe("y");
+    expect(ctx.runState.nodes.get("expand-1")?.status).toBe("pending");
+
+    warnSpy.mockRestore();
   });
 });

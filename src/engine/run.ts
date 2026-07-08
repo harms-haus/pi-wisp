@@ -189,23 +189,29 @@ function reconcileRunStatus(summary: RunSummary): RunStatus {
  * failure result when the IR could not be obtained or validated.
  */
 async function resolveIR(options: RunWorkflowOptions): Promise<{ ir: GraphIR } | RunFailure> {
+  // Obtain the IR from either a pre-built `options.ir` (resume path, loaded
+  // from an on-disk trust boundary) or the compile pipeline, then validate
+  // BOTH through validateIR so a tampered/resume IR cannot bypass checks
+  // (e.g. path traversal via node.cwd or a structurally-broken graph).
+  let ir: GraphIR;
   if (options.ir !== undefined) {
-    return { ir: options.ir };
+    ir = options.ir;
+  } else {
+    const compileResult = await compileWorkflow({
+      scriptSource: options.scriptSource,
+      scriptPath: options.scriptPath,
+      builderPath: options.builderPath,
+      harnessPath: options.harnessPath,
+    });
+    if ("error" in compileResult) {
+      return {
+        ok: false,
+        error: compileResult.error,
+        runDir: undefined,
+      };
+    }
+    ir = compileResult.ir;
   }
-  const compileResult = await compileWorkflow({
-    scriptSource: options.scriptSource,
-    scriptPath: options.scriptPath,
-    builderPath: options.builderPath,
-    harnessPath: options.harnessPath,
-  });
-  if ("error" in compileResult) {
-    return {
-      ok: false,
-      error: compileResult.error,
-      runDir: undefined,
-    };
-  }
-  const ir = compileResult.ir;
   const validationErrors = validateIR(ir);
   if (validationErrors.length > 0) {
     return {
