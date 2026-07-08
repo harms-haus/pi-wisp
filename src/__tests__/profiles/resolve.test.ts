@@ -20,7 +20,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { resolveProfile, resolveProfileSync } from "../../profiles/resolve.js";
+import { resolveProfileSync } from "../../profiles/resolve.js";
 import type { WispProfile } from "../../profiles/types.js";
 
 // ─── Fixture profiles ─────────────────────────────────────────────
@@ -110,36 +110,36 @@ afterAll(() => {
   rmSync(tempRoot, { recursive: true, force: true });
 });
 
-// ─── Tests: resolveProfile ────────────────────────────────────────
+// ─── Tests: resolveProfileSync ────────────────────────────────────
 
-describe("resolveProfile — scope precedence", () => {
+describe("resolveProfileSync — scope precedence", () => {
   it("returns the project-local profile when the same name exists in global", () => {
     // EXPECTED CONTRACT:
     //   When a profile name exists in both global and project scopes, the
     //   project-local version wins (higher precedence).
-    const result = resolveProfile("my-reviewer", {
+    const result = resolveProfileSync("my-reviewer", {
       cwd: projectCwd,
       inlineProfiles: undefined,
     });
 
-    expect(result.resolved).toBeDefined();
-    expect(result.resolved!.source).toBe("project");
-    expect(result.resolved!.profile.model).toBe("gpt-4o");
+    expect(result).toBeDefined();
+    expect(result!.source).toBe("project");
+    expect(result!.profile.model).toBe("gpt-4o");
   });
 
   it("returns the run-artifact profile when the same name exists in all scopes", () => {
     // EXPECTED CONTRACT:
     //   Run-artifact profiles have the highest precedence. When a profile
     //   name exists in all scopes, the run-artifact version wins.
-    const result = resolveProfile("my-reviewer", {
+    const result = resolveProfileSync("my-reviewer", {
       cwd: projectCwd,
       runDir,
       inlineProfiles: undefined,
     });
 
-    expect(result.resolved).toBeDefined();
-    expect(result.resolved!.source).toBe("run-artifact");
-    expect(result.resolved!.profile.model).toBe("o3");
+    expect(result).toBeDefined();
+    expect(result!.source).toBe("run-artifact");
+    expect(result!.profile.model).toBe("o3");
   });
 
   it("falls back to inline profile when no scoped profile is found", () => {
@@ -150,41 +150,33 @@ describe("resolveProfile — scope precedence", () => {
       "ad-hoc-worker": INLINE_PROFILE,
     };
 
-    const result = resolveProfile("ad-hoc-worker", {
+    const result = resolveProfileSync("ad-hoc-worker", {
       cwd: projectCwd,
       inlineProfiles: inlineMap,
     });
 
-    expect(result.resolved).toBeDefined();
-    expect(result.resolved!.source).toBe("inline");
-    expect(result.resolved!.profile.model).toBe("glm-5.1");
+    expect(result).toBeDefined();
+    expect(result!.source).toBe("inline");
+    expect(result!.profile.model).toBe("glm-5.1");
   });
 
-  it("returns a structured validation error when the profile name is not found in any scope", () => {
+  it("returns undefined when the profile name is not found in any scope", () => {
     // EXPECTED CONTRACT:
     //   When a profile name does not exist in ANY scope (no global, no
-    //   project, no run-artifact, and no inline match), resolveProfile
-    //   returns an error result with kind "validation" and a message
-    //   that includes the offending profile name.
-    const result = resolveProfile("nonexistent-profile", {
+    //   project, no run-artifact, and no inline match), resolveProfileSync
+    //   returns undefined.
+    const result = resolveProfileSync("nonexistent-profile", {
       cwd: projectCwd,
       inlineProfiles: {},
     });
 
-    expect(result.resolved).toBeUndefined();
-    expect(result.error).toBeDefined();
-    expect(result.error!.kind).toBe("validation");
-    expect(result.error!.message).toContain("nonexistent-profile");
+    expect(result).toBeUndefined();
   });
-});
 
-// ─── Tests: resolveProfileSync ────────────────────────────────────
-
-describe("resolveProfileSync", () => {
-  it("returns undefined when the profile name is not found", () => {
+  it("returns undefined for an unknown name even without inline profiles", () => {
     // EXPECTED CONTRACT:
-    //   The sync variant behaves the same as resolveProfile but returns
-    //   undefined (instead of a ResolveResult with error) when not found.
+    //   An unknown name resolves to undefined regardless of which scopes are
+    //   configured.
     const result = resolveProfileSync("unknown", {
       cwd: projectCwd,
       inlineProfiles: {},

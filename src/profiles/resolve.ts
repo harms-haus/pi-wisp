@@ -29,7 +29,7 @@ import type { ResolvedProfile, WispProfile } from "./types.js";
 // ── Result / option types ───────────────────────────────────────────
 
 /** Result of resolving a profile name across scopes. */
-export interface ResolveResult {
+interface ResolveResult {
   /** Present on success. */
   resolved?: ResolvedProfile;
   /** Present when the name was not found in any scope. */
@@ -71,7 +71,7 @@ function findInDir(dir: string, name: string, cacheKey: string): WispProfile | u
  * match with its source scope. If no match is found in any scope, returns an
  * error result with `kind: "validation"`.
  */
-export function resolveProfile(name: string, options: ResolveOptions = {}): ResolveResult {
+function resolveProfile(name: string, options: ResolveOptions = {}): ResolveResult {
   const { cwd, runDir, inlineProfiles } = options;
 
   // 1. Run-artifacts (highest precedence)

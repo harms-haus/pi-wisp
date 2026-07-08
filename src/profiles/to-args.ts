@@ -11,7 +11,7 @@
  * and reads its own persisted auth.
  *
  * Security: `extraArgs` is the untrusted escape hatch. The override-guard
- * (`isDangerousFlag` + `pushExtraArgs`) refuses any extraArg that would
+ * (`pushExtraArgs`) refuses any extraArg that would
  * bypass the profile's active capability restrictions (tools, extensions,
  * skills, context files), and any `--skill`/`--extension` value surviving the
  * guard must be path-contained within an allowed directory (cwd / agentDir).
@@ -38,17 +38,6 @@ const NO_SKILLS_FLAGS = ["--no-skills", "-ns"] as const;
 /** Context-files-disable flags. */
 const NO_CONTEXT_FILES_FLAGS = ["--no-context-files", "-nc"] as const;
 
-/** Every flag capable of overriding a profile capability setting. */
-const ALL_OVERRIDE_FLAGS = [
-  ...TOOL_FLAGS,
-  ...EXCLUDE_TOOLS_FLAGS,
-  ...EXTENSION_FLAGS,
-  ...NO_EXTENSIONS_FLAGS,
-  ...SKILL_FLAGS,
-  ...NO_SKILLS_FLAGS,
-  ...NO_CONTEXT_FILES_FLAGS,
-] as const;
-
 /** Reject args/values that begin with a shell operator or embed separators. */
 const SHELL_UNSAFE = /^[\s|&;$`!%^]|&&|\|\||;|>|>>|<|<<|\r|%/;
 
@@ -62,19 +51,8 @@ function flagMatches(arg: string, names: readonly string[]): boolean {
 
 // ── Security helpers ────────────────────────────────────────────────
 
-/**
- * Check whether a CLI argument is a capability-override flag (exact or
- * equals-sign form) — any flag that could bypass a profile restriction
- * (`--tools`, `--extension`, `--skill`, `--no-tools`, `--no-extensions`,
- * `--exclude-tools`, …). Whether it is actually refused depends on the active
- * restriction, checked by {@link pushExtraArgs}.
- */
-export function isDangerousFlag(arg: string): boolean {
-  return flagMatches(arg, ALL_OVERRIDE_FLAGS);
-}
-
 /** Whether `filePath` is `dir` itself or nested beneath it. */
-export function isWithinDir(filePath: string, dir: string): boolean {
+function isWithinDir(filePath: string, dir: string): boolean {
   const resolved = resolve(filePath);
   const resolvedDir = resolve(dir);
   return resolved === resolvedDir || resolved.startsWith(resolvedDir + sep);
@@ -165,7 +143,7 @@ function matchValueFlag(arg: string, next: string | undefined): MatchedValue | u
  * no-extensions, no-skills, no-context-files) onto `args` based on the
  * profile's fields.
  */
-export function pushBasicArgs(args: string[], profile: WispProfile): void {
+function pushBasicArgs(args: string[], profile: WispProfile): void {
   if (profile.provider) args.push("--provider", profile.provider);
   if (profile.model) args.push("--model", profile.model);
   if (profile.systemPrompt) args.push("--system-prompt", profile.systemPrompt);
@@ -189,7 +167,7 @@ export function pushBasicArgs(args: string[], profile: WispProfile): void {
  * Push `--skill` flags for `suggestedSkills`, validating paths are within
  * allowed directories (cwd / agentDir) when those are provided.
  */
-export function pushSkillArgs(
+function pushSkillArgs(
   args: string[],
   profile: WispProfile,
   cwd?: string,
@@ -219,7 +197,7 @@ export function pushSkillArgs(
  *   - null bytes rejected;
  *   - shell metacharacters / command separators rejected.
  */
-export function pushExtraArgs(
+function pushExtraArgs(
   args: string[],
   profile: WispProfile,
   cwd?: string,

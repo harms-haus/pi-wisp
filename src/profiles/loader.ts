@@ -26,7 +26,6 @@ import { join } from "node:path";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
 import { getAgentDir } from "../constants.js";
-import { resolveExcludeTools } from "./to-args.js";
 import type { ThinkingLevel, WispProfile, WispProfiles } from "./types.js";
 
 // ── TTL cache ──────────────────────────────────────────────────────
@@ -66,15 +65,10 @@ class TtlCache<T> {
 
 const profilesCache = new TtlCache<WispProfiles>(5000);
 
-/** Manually invalidate the in-memory profile cache. */
-export function invalidateProfilesCache(): void {
-  profilesCache.invalidate();
-}
-
 // ── Helpers for array/string frontmatter fields ─────────────────────
 
 /** Parse a frontmatter value that may be a comma-delimited string or an array. */
-export function parseStringOrArray(value: unknown): string[] | undefined {
+function parseStringOrArray(value: unknown): string[] | undefined {
   if (Array.isArray(value)) {
     return value.map(String);
   }
@@ -131,44 +125,6 @@ const ARRAY_FIELDS = [
   "suggestedSkills",
   "loadSkills",
 ] as const;
-
-// ── Profile tool validation ─────────────────────────────────────────
-
-/**
- * Validate that a profile's tool settings are internally consistent.
- *
- * Throws if both `tools` (allowlist) and `excludeTools` (blacklist) are set,
- * since they are mutually exclusive.
- */
-export function validateProfileTools(profile: WispProfile, profileName?: string): void {
-  if (
-    profile.tools &&
-    profile.tools.length > 0 &&
-    profile.excludeTools &&
-    profile.excludeTools.length > 0
-  ) {
-    throw new Error(
-      `Profile${profileName ? ` "${profileName}"` : ""} has both "tools" (allowlist) and "excludeTools" (blacklist) set. These are mutually exclusive — choose one or the other.`,
-    );
-  }
-}
-
-/**
- * Resolve `excludeTools` against the full tool set to compute an explicit
- * `tools` allowlist. Returns a new profile with `tools` set and `excludeTools`
- * removed. If the profile has no `excludeTools`, returns the profile unchanged.
- *
- * Delegates the actual set subtraction to the canonical
- * {@link resolveExcludeTools} (to-args.ts) so there is a single excludeTools
- * resolver.
- */
-export function applyExcludeTools(profile: WispProfile, allToolNames: string[]): WispProfile {
-  if (!profile.excludeTools || profile.excludeTools.length === 0) {
-    return profile;
-  }
-  const computed = resolveExcludeTools(profile, allToolNames);
-  return { ...profile, tools: computed, excludeTools: undefined };
-}
 
 // ── Profile loading from markdown files ─────────────────────────────
 
@@ -239,7 +195,7 @@ export function parseProfileFromFrontmatter(
  * exist. Non-fatal errors on individual files are logged but do not abort the
  * batch.
  */
-export function loadProfilesFromDir(dir: string, profiles: WispProfiles): void {
+function loadProfilesFromDir(dir: string, profiles: WispProfiles): void {
   if (!existsSync(dir)) {
     return;
   }
@@ -274,46 +230,4 @@ export function loadProfilesFromDir(dir: string, profiles: WispProfiles): void {
       );
     }
   }
-}
-
-/**
- * Load all profiles from global (`~/.pi/agent/agent-profiles/`) and, if `cwd`
- * is provided, project-local (`<cwd>/.pi/agent-profiles/`) directories.
- *
- * Results are cached with a 5-second TTL keyed by cwd. Project-local profiles
- * override global ones with the same name.
- */
-export function loadProfiles(cwd?: string): WispProfiles {
-  const key = cwd ?? "";
-  const cached = profilesCache.get(key);
-  if (cached) {
-    return cached;
-  }
-
-  const profiles: WispProfiles = {};
-
-  // Load global profiles
-  loadProfilesFromDir(getGlobalProfilesDir(), profiles);
-
-  // Load project-local profiles (override globals)
-  if (cwd) {
-    loadProfilesFromDir(getProjectProfilesDir(cwd), profiles);
-  }
-
-  profilesCache.set(key, profiles);
-  return profiles;
-}
-
-/**
- * Look up a profile by name in an already-loaded profiles map.
- * Returns undefined if not found.
- *
- * (Scope-precedence resolution lives in `resolve.ts` as the sole
- * `resolveProfile`.)
- */
-export function lookupProfile(
-  profiles: WispProfiles,
-  profileName: string,
-): WispProfile | undefined {
-  return profiles[profileName];
 }

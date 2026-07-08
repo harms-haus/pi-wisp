@@ -17,12 +17,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { describe, it, expect } from "vitest";
-import {
-  profileToArgs,
-  isDangerousFlag,
-  pushExtraArgs,
-  resolveExcludeTools,
-} from "../../profiles/to-args.js";
+import { profileToArgs, resolveExcludeTools } from "../../profiles/to-args.js";
 import type { WispProfile } from "../../profiles/types.js";
 
 // ─── Tests: profileToArgs ─────────────────────────────────────────
@@ -138,43 +133,9 @@ describe("profileToArgs", () => {
   });
 });
 
-// ─── Tests: isDangerousFlag ──────────────────────────────────────
+// ─── Tests: profileToArgs — extraArgs security ───────────────────────────
 
-describe("isDangerousFlag", () => {
-  it("returns true for --tools", () => {
-    expect(isDangerousFlag("--tools")).toBe(true);
-  });
-
-  it("returns true for --tools=<value>", () => {
-    expect(isDangerousFlag("--tools=read,bash")).toBe(true);
-  });
-
-  it("returns true for -t", () => {
-    expect(isDangerousFlag("-t")).toBe(true);
-  });
-
-  it("returns true for -t=<value>", () => {
-    expect(isDangerousFlag("-t=read")).toBe(true);
-  });
-
-  it("returns true for --no-tools", () => {
-    expect(isDangerousFlag("--no-tools")).toBe(true);
-  });
-
-  it("returns true for --no-tools=<value>", () => {
-    expect(isDangerousFlag("--no-tools=true")).toBe(true);
-  });
-
-  it("returns false for benign flags like --verbose", () => {
-    expect(isDangerousFlag("--verbose")).toBe(false);
-    expect(isDangerousFlag("--model")).toBe(false);
-    expect(isDangerousFlag("--provider")).toBe(false);
-  });
-});
-
-// ─── Tests: pushExtraArgs security ───────────────────────────────
-
-describe("pushExtraArgs — security validation", () => {
+describe("profileToArgs — extraArgs security validation", () => {
   it("rejects an extraArg that is a tool-override flag when tool restrictions are active", () => {
     // EXPECTED CONTRACT:
     //   When the profile has tool restrictions (tools, excludeTools, or
@@ -185,9 +146,7 @@ describe("pushExtraArgs — security validation", () => {
       extraArgs: ["--verbose", "--tools", "write"],
     };
 
-    expect(() => {
-      pushExtraArgs([], profile);
-    }).toThrow(/--tools/i);
+    expect(() => profileToArgs(profile)).toThrow(/--tools/i);
   });
 
   it("rejects an extraArg containing a null byte", () => {
@@ -197,9 +156,7 @@ describe("pushExtraArgs — security validation", () => {
       extraArgs: ["malformed\0arg"],
     };
 
-    expect(() => {
-      pushExtraArgs([], profile);
-    }).toThrow(/null byte/i);
+    expect(() => profileToArgs(profile)).toThrow(/null byte/i);
   });
 
   it("rejects an extraArg starting with shell metacharacters like ; or |", () => {
@@ -210,9 +167,7 @@ describe("pushExtraArgs — security validation", () => {
       extraArgs: ["; rm -rf /"],
     };
 
-    expect(() => {
-      pushExtraArgs([], profile);
-    }).toThrow(/unsafe/i);
+    expect(() => profileToArgs(profile)).toThrow(/unsafe/i);
   });
 
   it("rejects an extraArg containing && command separator", () => {
@@ -220,9 +175,7 @@ describe("pushExtraArgs — security validation", () => {
       extraArgs: ["&& echo hacked"],
     };
 
-    expect(() => {
-      pushExtraArgs([], profile);
-    }).toThrow(/unsafe/i);
+    expect(() => profileToArgs(profile)).toThrow(/unsafe/i);
   });
 
   it("allows benign extraArgs when no tool restrictions are active", () => {
@@ -233,10 +186,9 @@ describe("pushExtraArgs — security validation", () => {
       extraArgs: ["--verbose", "--max-tokens=1000"],
     };
 
-    const args: string[] = [];
-    expect(() => {
-      pushExtraArgs(args, profile);
-    }).not.toThrow();
+    const result = profileToArgs(profile);
+    expect(result.args).toContain("--verbose");
+    expect(result.args).toContain("--max-tokens=1000");
   });
 
   // ═════════════════════════════════════════════════════════════════
@@ -247,19 +199,13 @@ describe("pushExtraArgs — security validation", () => {
     // EXPECTED CONTRACT:
     //   When noExtensions is true, extraArgs may NOT contain --extension.
     //   When noSkills is true, extraArgs may NOT contain --skill.
-    //   The override-guard (isDangerousFlag) must block these flags when
-    //   the corresponding restriction is active.
+    //   The override-guard must block these flags when the corresponding
+    //   restriction is active.
     expect(() => {
-      pushExtraArgs([], {
-        noExtensions: true,
-        extraArgs: ["--extension", "/evil"],
-      });
+      profileToArgs({ noExtensions: true, extraArgs: ["--extension", "/evil"] });
     }).toThrow();
     expect(() => {
-      pushExtraArgs([], {
-        noSkills: true,
-        extraArgs: ["--skill", "/evil"],
-      });
+      profileToArgs({ noSkills: true, extraArgs: ["--skill", "/evil"] });
     }).toThrow();
   });
 
@@ -272,10 +218,7 @@ describe("pushExtraArgs — security validation", () => {
     //   Short form -e (equivalent to --extension) is blocked when
     //   noExtensions restricts extension overrides.
     expect(() => {
-      pushExtraArgs([], {
-        noExtensions: true,
-        extraArgs: ["-e", "/evil"],
-      });
+      profileToArgs({ noExtensions: true, extraArgs: ["-e", "/evil"] });
     }).toThrow();
   });
 
@@ -284,10 +227,7 @@ describe("pushExtraArgs — security validation", () => {
     //   Short form -ne (equivalent to --no-extensions) is blocked when
     //   noExtensions restricts extension overrides.
     expect(() => {
-      pushExtraArgs([], {
-        noExtensions: true,
-        extraArgs: ["-ne"],
-      });
+      profileToArgs({ noExtensions: true, extraArgs: ["-ne"] });
     }).toThrow();
   });
 
@@ -296,10 +236,7 @@ describe("pushExtraArgs — security validation", () => {
     //   Short form -ns (equivalent to --no-skills) is blocked when
     //   noSkills restricts skill overrides.
     expect(() => {
-      pushExtraArgs([], {
-        noSkills: true,
-        extraArgs: ["-ns"],
-      });
+      profileToArgs({ noSkills: true, extraArgs: ["-ns"] });
     }).toThrow();
   });
 
@@ -308,10 +245,7 @@ describe("pushExtraArgs — security validation", () => {
     //   Short form -nc (equivalent to --no-context-files) is blocked
     //   when noContextFiles restricts context-file overrides.
     expect(() => {
-      pushExtraArgs([], {
-        noContextFiles: true,
-        extraArgs: ["-nc"],
-      });
+      profileToArgs({ noContextFiles: true, extraArgs: ["-nc"] });
     }).toThrow();
   });
 
@@ -320,10 +254,7 @@ describe("pushExtraArgs — security validation", () => {
     //   Short form -xt (equivalent to --exclude-tools) is blocked when
     //   tool restrictions (tools, excludeTools, or noTools) are active.
     expect(() => {
-      pushExtraArgs([], {
-        tools: ["read", "bash"],
-        extraArgs: ["-xt", "write"],
-      });
+      profileToArgs({ tools: ["read", "bash"], extraArgs: ["-xt", "write"] });
     }).toThrow();
   });
 
@@ -335,9 +266,7 @@ describe("pushExtraArgs — security validation", () => {
     //   allowed dir configured, containment cannot be verified and the
     //   value is refused outright.
     expect(() => {
-      pushExtraArgs([], {
-        extraArgs: ["--skill", "/outside/project/evil.sh"],
-      });
+      profileToArgs({ extraArgs: ["--skill", "/outside/project/evil.sh"] });
     }).toThrow();
   });
 });
