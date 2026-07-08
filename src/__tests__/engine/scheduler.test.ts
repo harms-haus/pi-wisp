@@ -1023,3 +1023,89 @@ describe("acquire()", () => {
     expectPoolSlot(scheduler.usage(), "byModel", "anthropic/claude-sonnet-4", 1, 1);
   });
 });
+
+// ─── abort-during-registration race (no stale waiter) ───────────
+//
+// `acquire()` must register the waiter in the waitQueue BEFORE wiring up the
+// abort listener. Otherwise, if the signal fires in the window between
+// listener setup and `waitQueue.push(entry)`, the onAbort handler cannot find
+// the entry to splice it — leaving a stale entry behind. That stale entry is
+// never removed: the next `release()` "wakes" it, acquiring a pool slot that
+// nobody holds and never releases (a permanent capacity leak + queue
+// pollution).
+//
+// A real AbortController only ever fires its listener during an explicit
+// `abort()` call, so to deterministically exercise the registration window we
+// use a minimal fake signal that dispatches its listener synchronously the
+// instant it is registered. This models the race without relying on scheduler
+// internals or private state.
+
+describe("acquire() — abort-during-registration leaves no stale waiter", () => {
+  /**
+   * Minimal AbortSignal double. `addEventListener` fires the callback
+   * SYNCHRONOUSLY at registration time — i.e. the abort happens in the exact
+   * window between the listener being wired up and the entry being pushed to
+   * the waitQueue. `aborted` is intentionally kept `false` so the race is
+   * driven purely by the listener dispatch, not by an already-aborted flag.
+   */
+  function racingSignal(): AbortSignal {
+    return {
+      get aborted(): boolean {
+        return false;
+      },
+      addEventListener(_type: string, cb: () => void): void {
+        // Fire immediately: this is the race. The listener exists, but the
+        // waiter entry may not yet be in the queue.
+        cb();
+      },
+      removeEventListener(): void {
+        /* no-op */
+      },
+    } as unknown as AbortSignal;
+  }
+
+  it("does not leak a slot when abort fires during listener registration", async () => {
+    // Capacity 1: first acquire fills the pool, second acquire must queue.
+    const scheduler = createScheduler(config({ maxAgentConcurrency: 1 }));
+    const n = node();
+
+    // 1. Fill the pool (1/1).
+    expect(scheduler.tryAcquire(n)).toBe(true);
+
+    // 2. Second acquire queues; the racing signal "aborts" while the waiter
+    //    entry is being set up. The acquire must resolve to false.
+    const result = await scheduler.acquire(n, racingSignal());
+    expect(result).toBe(false);
+
+    // 3. Release the only real holder. The pool must drain to zero.
+    //    BUGGY (register-then-push): onAbort ran before the push, so it could
+    //    not splice the entry; the now-stale entry gets woken here, stealing a
+    //    slot nobody holds → global.used stays at 1 (a leak).
+    //    FIXED (push-then-register): onAbort finds and removes the entry, so
+    //    nothing is left to wake → global.used is 0.
+    scheduler.release(n);
+    expect(scheduler.usage().global.used).toBe(0);
+  });
+
+  it("leaves the waitQueue empty so a fresh acquire succeeds immediately", async () => {
+    const scheduler = createScheduler(config({ maxAgentConcurrency: 1 }));
+    const n = node();
+
+    // Fill the pool, then perform a racing (aborted) acquire.
+    expect(scheduler.tryAcquire(n)).toBe(true);
+    expect(await scheduler.acquire(n, racingSignal())).toBe(false);
+
+    // Free the pool.
+    scheduler.release(n);
+    expect(scheduler.usage().global.used).toBe(0);
+
+    // A brand-new acquire with no signal must succeed synchronously — proving
+    // no stale (already-resolved) waiter is lingering ahead of it to consume
+    // the slot. BUGGY: the stale entry steals the slot, so this resolves true
+    // only via the stale waiter being woken AND global.used ends at 1 with the
+    // fresh acquire returning false (denied) instead.
+    const fresh = scheduler.acquire(n);
+    expect(await fresh).toBe(true);
+    expect(scheduler.usage().global.used).toBe(1);
+  });
+});

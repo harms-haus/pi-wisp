@@ -149,6 +149,11 @@ export function createScheduler(
     if (signal?.aborted) return Promise.resolve(false);
     return new Promise<boolean>((resolve) => {
       const entry: WaiterEntry = { node, resolve };
+      // Push the waiter BEFORE wiring up the abort listener. If the signal
+      // fires the instant the listener is attached, onAbort can still find
+      // (and remove) the entry; otherwise a stale, already-resolved entry
+      // lingers in the queue and steals a slot on the next release().
+      waitQueue.push(entry);
       if (signal) {
         const onAbort = (): void => {
           const idx = waitQueue.indexOf(entry);
@@ -159,11 +164,12 @@ export function createScheduler(
         signal.addEventListener("abort", onAbort, { once: true });
         if (signal.aborted) {
           signal.removeEventListener("abort", onAbort);
+          const idx = waitQueue.indexOf(entry);
+          if (idx !== -1) waitQueue.splice(idx, 1);
           resolve(false);
           return;
         }
       }
-      waitQueue.push(entry);
     });
   }
   function snapshot(record: PoolRecord): PoolRecord {
