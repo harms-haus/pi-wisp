@@ -98,13 +98,20 @@ function serializeRun(run: RunState): unknown {
 
 /**
  * Build a mock session-manager context for reconstructRuns.
+ *
+ * Mimics the real pi SessionManager: `getBranch` is a *method* that reads
+ * from `this`, not a detached arrow function. A regression that detaches
+ * the call (e.g. `const getBranch = sm.getBranch; getBranch()`) loses the
+ * `this` binding and must fail here — this guards against it sneaking back in.
  */
 function mockCtx(branch: unknown[]): { sessionManager: { getBranch: () => unknown[] } } {
-  return {
-    sessionManager: {
-      getBranch: () => branch,
+  const sessionManager = {
+    _branch: branch,
+    getBranch() {
+      return this._branch;
     },
   };
+  return { sessionManager };
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────

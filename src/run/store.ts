@@ -309,12 +309,13 @@ export function createRunStore(maxRuns?: number): StoreAPI {
     reconstructRuns(ctx: { sessionManager?: { getBranch?: () => unknown[] } }): void {
       const sessionManager = ctx.sessionManager;
       if (sessionManager === undefined) return;
-      const getBranch = sessionManager.getBranch;
-      if (typeof getBranch !== "function") return;
+      if (typeof sessionManager.getBranch !== "function") return;
 
       let branch: unknown[];
       try {
-        branch = getBranch();
+        // Call as a method so `this` stays bound to the session manager
+        // (getBranch reads this.leafId); a detached call would throw.
+        branch = sessionManager.getBranch();
       } catch (err) {
         // Be resilient to a throwing getBranch, but surface the failure rather
         // than silently swallowing it (doc claims resilient, not silent).
