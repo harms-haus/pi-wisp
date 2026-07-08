@@ -32,8 +32,8 @@ import { tmpdir } from "node:os";
 // We mock at the vitest level so the orchestrator receives controlled
 // responses for every external call it makes.
 
-vi.mock("../../dsl/ir.js", async () => {
-  const actual = await vi.importActual<Record<string, unknown>>("../../dsl/ir.js");
+vi.mock("../../dsl/validate.js", async () => {
+  const actual = await vi.importActual<Record<string, unknown>>("../../dsl/validate.js");
   const realValidate = actual.validateIR as (
     ir: unknown,
   ) => Array<{ kind: string; message: string }>;
@@ -140,7 +140,7 @@ import type {
 // ── Import mocked modules for assertion ────────────────────────────
 
 import { compileWorkflow } from "../../dsl/compile.js";
-import { validateIR } from "../../dsl/ir.js";
+import { validateIR } from "../../dsl/validate.js";
 import { createRunDir } from "../../run/layout.js";
 import { AuditLogger, writeRunJson } from "../../run/audit.js";
 import { executeDAG } from "../../engine/executor.js";

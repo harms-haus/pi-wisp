@@ -9,7 +9,10 @@
 
 import { describe, it, expect } from "vitest";
 
-import { validateIR } from "../../dsl/ir.js";
+// NOTE: After the module split, validateIR lives in validate.ts (moved out of
+// ir.ts). Importing from the new location pins that the refactor is
+// behavior-preserving: the full validation contract must hold from validate.js.
+import { validateIR } from "../../dsl/validate.js";
 import type { GraphIR, IRNode } from "../../types.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────
@@ -411,5 +414,44 @@ describe("validateIR — error shape contract", () => {
         expect(typeof err.location).toBe("string");
       }
     }
+  });
+});
+
+describe("validateIR — error aggregation + ordering", () => {
+  it("aggregates multiple independent errors into a single returned array", () => {
+    // concurrency error + duplicate id + dangling dependsOn ref — all at once.
+    const ir = makeEmptyIR({
+      options: { maxConcurrency: 0 },
+      nodes: [
+        { id: "a", kind: "node", prompt: "A first" },
+        { id: "a", kind: "node", prompt: "A second" },
+        { id: "b", kind: "node", prompt: "B", dependsOn: ["missing"] },
+      ],
+    });
+    const errors = validateIR(ir);
+    expect(errors.some((e) => /concurrency/i.test(e.message))).toBe(true);
+    expect(errors.some((e) => /duplicate/i.test(e.message))).toBe(true);
+    expect(errors.some((e) => /dependsOn/i.test(e.message))).toBe(true);
+    // No short-circuit: all three independent violations are reported.
+    expect(errors.length).toBeGreaterThanOrEqual(3);
+  });
+
+  // The validateIR docstring promises node-level checks are emitted BEFORE
+  // edge-consistency errors. Pin that ordering so consumers using `.find()`
+  // resolve to the node-specific error (which carries the expected nodeId).
+  it("emits node-level reference errors before edge-consistency errors", () => {
+    const ir = makeEmptyIR({
+      nodes: [
+        { id: "a", kind: "node", prompt: "A" },
+        { id: "b", kind: "node", prompt: "B", dependsOn: ["missing"] },
+      ],
+      edges: [{ from: "a", to: "nowhere", kind: "dep" }],
+    });
+    const errors = validateIR(ir);
+    const nodeErrIdx = errors.findIndex((e) => /dependsOn/.test(e.message));
+    const edgeErrIdx = errors.findIndex((e) => /Edge/.test(e.message));
+    expect(nodeErrIdx).toBeGreaterThanOrEqual(0);
+    expect(edgeErrIdx).toBeGreaterThanOrEqual(0);
+    expect(nodeErrIdx).toBeLessThan(edgeErrIdx);
   });
 });

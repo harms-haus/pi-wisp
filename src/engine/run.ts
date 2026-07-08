@@ -30,7 +30,7 @@ import type {
 import type { RunSummary } from "./events.js";
 import { compileWorkflow } from "../dsl/compile.js";
 import { SKIP_REASONS } from "./retry.js";
-import { validateIR } from "../dsl/ir.js";
+import { validateIR } from "../dsl/validate.js";
 import { createRunDir, copyWorkflowArtifact, writeGraph } from "../run/layout.js";
 import { AuditLogger, writeRunJson } from "../run/audit.js";
 import { RUN_ARTIFACTS_DIR, RUN_PROFILES_SUBDIR, RUN_SESSIONS_DIR } from "../constants.js";

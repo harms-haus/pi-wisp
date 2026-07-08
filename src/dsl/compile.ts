@@ -25,7 +25,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { GraphIR, WispError } from "../types.js";
-import { validateIR } from "./ir.js";
+import { validateIR } from "./validate.js";
 
 // ─── Input shape ───────────────────────────────────────────────────
 
