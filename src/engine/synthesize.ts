@@ -16,6 +16,7 @@
 
 import type { NodeCtx, NormalizedEvent, WispError } from "../types.js";
 import type { AgentAdapter } from "../adapters/types.js";
+import { DEFAULT_AGENT_TYPE } from "../constants.js";
 import { finalTextFromEvents, invokeAdapter } from "./events.js";
 
 // ─── Public types ─────────────────────────────────────────────────
@@ -206,7 +207,7 @@ async function runAgentSynthesis(
   options: SynthesisOptions,
   outputs: unknown[],
 ): Promise<SynthesisResult> {
-  const agentType = options.agentType ?? "pi";
+  const agentType = options.agentType ?? DEFAULT_AGENT_TYPE;
 
   // Build the merge prompt referencing each member output.
   // When an instructionPrompt is provided, it augments or replaces the

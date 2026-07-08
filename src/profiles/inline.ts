@@ -11,6 +11,7 @@
  * field set, defaults `agentType` to `"pi"`, and has no special privileges.
  */
 
+import { DEFAULT_AGENT_TYPE } from "../constants.js";
 import type { WispProfile } from "./types.js";
 
 /**
@@ -28,7 +29,7 @@ export function inlineProfile(fields: Partial<WispProfile> & { name: string }): 
   const profile: WispProfile = { ...rest };
 
   if (!profile.agentType) {
-    profile.agentType = "pi";
+    profile.agentType = DEFAULT_AGENT_TYPE;
   }
 
   return profile;

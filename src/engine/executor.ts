@@ -52,7 +52,7 @@ import type {
   RunState,
 } from "../types.js";
 import { debounce } from "../utils.js";
-import { CONFIG_DEFAULTS } from "../constants.js";
+import { CONFIG_DEFAULTS, DEFAULT_AGENT_TYPE } from "../constants.js";
 import { createNodeCtx } from "./context.js";
 import {
   resolvePolicy,
@@ -130,8 +130,8 @@ function sleep(ms: number): Promise<void> {
 
 /** Resolve the agent type for a node (defaults to "pi"). */
 function resolveAgentType(node: IRNode): string {
-  if (node.kind === "node" || node.kind === "reduce") return node.agentType ?? "pi";
-  return "pi";
+  if (node.kind === "node" || node.kind === "reduce") return node.agentType ?? DEFAULT_AGENT_TYPE;
+  return DEFAULT_AGENT_TYPE;
 }
 
 /**
@@ -651,7 +651,7 @@ export async function executeDAG(options: ExecuteDAGOptions): Promise<RunSummary
       if (reduceNode.profileRef) {
         const resolved = resolveProfileSync(reduceNode.profileRef, options.profiles ?? {});
         if (resolved) {
-          const agentType = reduceNode.agentType ?? "pi";
+          const agentType = reduceNode.agentType ?? DEFAULT_AGENT_TYPE;
           adapter = getAdapter(agentType, node.id);
         }
       }

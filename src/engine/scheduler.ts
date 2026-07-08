@@ -26,7 +26,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import type { PoolSlot, PoolUsage, WispConfig } from "../types.js";
-import { CONFIG_DEFAULTS } from "../constants.js";
+import { CONFIG_DEFAULTS, DEFAULT_AGENT_TYPE } from "../constants.js";
 
 // ─── SchedulableNode ──────────────────────────────────────────────
 
@@ -116,7 +116,7 @@ export function createScheduler(
   }
   function nodePools(node: SchedulableNode): PoolSlot[] {
     const pools: PoolSlot[] = [global];
-    const agentSlot = poolFor(byAgentType, node.agentType ?? "pi", agentTypeLimits);
+    const agentSlot = poolFor(byAgentType, node.agentType ?? DEFAULT_AGENT_TYPE, agentTypeLimits);
     if (agentSlot !== undefined) pools.push(agentSlot);
     if (node.provider !== undefined) {
       const providerSlot = poolFor(byProvider, node.provider, providerLimits);

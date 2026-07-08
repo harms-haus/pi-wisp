@@ -44,6 +44,9 @@ export const builderPath = fileURLToPath(new URL("./dsl/builder.ts", import.meta
  */
 export const harnessPath = fileURLToPath(new URL("./dsl/compile-harness.ts", import.meta.url));
 
+/** Default agent type when none is explicitly specified (v1 ships only the pi adapter). */
+export const DEFAULT_AGENT_TYPE = "pi";
+
 /** Default values for the scalar config fields (concurrency/retries/backoff). */
 export const CONFIG_DEFAULTS = {
   maxAgentConcurrency: 12,

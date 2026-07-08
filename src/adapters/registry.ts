@@ -5,6 +5,7 @@
 // of AgentAdapter instances. See tests in src/__tests__/adapters/registry.test.ts.
 // ═══════════════════════════════════════════════════════════════════════════
 
+import { DEFAULT_AGENT_TYPE } from "../constants.js";
 import type { AgentAdapter } from "./types.js";
 
 // ─── AdapterNotRegisteredError ──────────────────────────────────
@@ -52,14 +53,14 @@ export function clearAdapters(): void {
  *
  * @param type - Adapter type (e.g. `"pi"`, `"codex"`). Defaults to `"pi"`.
  */
-export function getAdapter(type: string = "pi"): AgentAdapter {
+export function getAdapter(type: string = DEFAULT_AGENT_TYPE): AgentAdapter {
   // 1. Exact match
   const exact = adapters.get(type);
   if (exact) return exact;
 
   // 2. Fallback to "pi" only when the requested type differs from "pi"
-  if (type !== "pi") {
-    const pi = adapters.get("pi");
+  if (type !== DEFAULT_AGENT_TYPE) {
+    const pi = adapters.get(DEFAULT_AGENT_TYPE);
     if (pi) {
       console.warn(`Adapter type "${type}" not registered, falling back to "pi"`);
       return pi;
@@ -69,7 +70,7 @@ export function getAdapter(type: string = "pi"): AgentAdapter {
   // 3. No fallback available
   throw new AdapterNotRegisteredError(
     `No adapter registered for type "${type}"${
-      type !== "pi" ? ' and no fallback "pi" adapter available' : ""
+      type !== DEFAULT_AGENT_TYPE ? ' and no fallback "pi" adapter available' : ""
     }`,
   );
 }

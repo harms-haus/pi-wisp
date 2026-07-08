@@ -11,6 +11,7 @@
  */
 
 import type { AgentAdapter, NodeInvocationContext } from "../adapters/types.js";
+import { DEFAULT_AGENT_TYPE } from "../constants.js";
 import { runAgent, type RunAgentResult } from "../spawn/spawner.js";
 import type { NodeRuntime, NormalizedEvent } from "../types.js";
 
@@ -214,7 +215,7 @@ export async function invokeAdapter(
   }
 
   const invocation = adapter.buildInvocation(
-    { profile: { agentType: agentType ?? "pi" }, source: "inline" },
+    { profile: { agentType: agentType ?? DEFAULT_AGENT_TYPE }, source: "inline" },
     { nodeId, attempt, prompt, cwd },
   );
   return runAgent({

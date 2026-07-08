@@ -18,7 +18,7 @@ import {
   getProjectProfilesDir,
   loadProfilesFromDirCached,
 } from "../profiles/loader.js";
-import { RUN_PROFILES_SUBDIR } from "../constants.js";
+import { RUN_PROFILES_SUBDIR, DEFAULT_AGENT_TYPE } from "../constants.js";
 
 // ─── Parameter schema (§13) ───────────────────────────────────────
 
@@ -71,7 +71,7 @@ function summarizeTools(p: WispProfile): string {
 function toEntry(name: string, p: WispProfile, source: string): ProfileEntry {
   return {
     name,
-    agentType: p.agentType ?? "pi",
+    agentType: p.agentType ?? DEFAULT_AGENT_TYPE,
     provider: p.provider ?? "",
     model: p.model ?? "",
     thinkingLevel: p.thinkingLevel ?? "",

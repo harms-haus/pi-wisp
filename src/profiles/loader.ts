@@ -25,7 +25,7 @@ import { join } from "node:path";
 
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
-import { getAgentDir } from "../constants.js";
+import { getAgentDir, DEFAULT_AGENT_TYPE } from "../constants.js";
 import type { ThinkingLevel, WispProfile, WispProfiles } from "./types.js";
 
 // ── TTL cache ──────────────────────────────────────────────────────
@@ -183,7 +183,7 @@ export function parseProfileFromFrontmatter(
 
   // agentType defaults to "pi" (D1 — v1 ships only the pi adapter)
   if (!profile.agentType) {
-    profile.agentType = "pi";
+    profile.agentType = DEFAULT_AGENT_TYPE;
   }
 
   return profile;

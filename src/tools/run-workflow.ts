@@ -20,7 +20,13 @@ import { compileWorkflow } from "../dsl/compile.js";
 import { runWorkflow } from "../engine/run.js";
 import { prepareResume } from "../engine/resume.js";
 import { piAdapter } from "../adapters/pi.js";
-import { CONFIG_DEFAULTS, WISP_CONFIG_DIR, builderPath, harnessPath } from "../constants.js";
+import {
+  CONFIG_DEFAULTS,
+  DEFAULT_AGENT_TYPE,
+  WISP_CONFIG_DIR,
+  builderPath,
+  harnessPath,
+} from "../constants.js";
 import { loadConfig } from "../config.js";
 import { clearWidget, WISP_WIDGET_NAME, renderWidget } from "../tui/widget.js";
 
@@ -61,7 +67,7 @@ export const RunWorkflowParams = Type.Object(
  * when the requested type differs from "pi".
  */
 function defaultGetAdapter(type?: string, _nodeId?: string) {
-  if (type !== undefined && type !== "pi") {
+  if (type !== undefined && type !== DEFAULT_AGENT_TYPE) {
     console.warn(
       `run_workflow: requested adapter "${type}" is not available (v1 only ships pi); falling back to pi`,
     );
