@@ -81,6 +81,12 @@ export interface ReviewLoopOptions {
   /** Maximum number of review rounds before forcing termination. */
   maxRounds: number;
   /**
+   * External node ids the loop must wait for before starting. Loop edges are
+   * not gating, so a reviewLoop sequenced after upstream nodes MUST declare
+   * them here (or it will start immediately at run start).
+   */
+  dependsOn?: string[];
+  /**
    * Optional accept predicate: called after each gate review.
    * Receives ctx with gate output; returns true to accept / break the loop.
    * When absent the loop runs until `maxRounds` (the default `until` is
@@ -150,12 +156,21 @@ export function expandReviewLoop(id: string, opts: ReviewLoopOptions): MacroExpa
     until: untilFn,
     maxIterations: opts.maxRounds,
     primitive: { kind: "reviewLoop" },
+    ...(opts.dependsOn ? { dependsOn: [...opts.dependsOn] } : {}),
   };
 
   const nodes: BuilderNode[] = [workerNode, gateNode, loopNode];
   const edges: IREdge[] = [
     { from: workerId, to: gateId, kind: "dep" },
-    { from: workerId, to: id, kind: "loop" },
+    // Gate the worker (loop body) on the loop via loop→body so it is NOT
+    // scheduled as an independent free node (it must run via the loop handler)
+    // and so skip propagates loop → worker → gate. No `loop`-kind edge (it is
+    // non-gating and would falsely cycle with this dep edge in detectCycles).
+    { from: id, to: workerId, kind: "dep" },
+    // dependsOn gates the LOOP on upstream nodes (loop edges are not gating).
+    ...(opts.dependsOn
+      ? opts.dependsOn.map((dep) => ({ from: dep, to: id, kind: "dep" as const }))
+      : []),
   ];
   const conditions: BuilderCondition[] = [{ id: `${id}:accept`, on: gateId, fn: untilFn }];
 

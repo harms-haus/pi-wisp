@@ -93,6 +93,9 @@ export interface WorkflowBuilder {
    * @param opts.body      Node id (or spec) for the loop body.
    * @param opts.until     Predicate fn (receives ctx, returns boolean).
    * @param opts.maxIterations  Hard cap on loop iterations.
+   * @param opts.dependsOn External node ids the loop waits for before starting.
+   *                       Loop edges are NOT gating, so a loop needs explicit
+   *                       `dependsOn` to be sequenced after upstream nodes.
    */
   loop(
     id: string,
@@ -100,6 +103,7 @@ export interface WorkflowBuilder {
       body: string;
       until: (ctx: unknown) => boolean;
       maxIterations?: number;
+      dependsOn?: string[];
     },
   ): WorkflowBuilder;
 
@@ -297,18 +301,41 @@ class WorkflowBuilderImpl implements WorkflowBuilder {
 
   loop(
     id: string,
-    opts: { body: string; until: (ctx: unknown) => boolean; maxIterations?: number },
+    opts: {
+      body: string;
+      until: (ctx: unknown) => boolean;
+      maxIterations?: number;
+      dependsOn?: string[];
+    },
   ): WorkflowBuilder {
     this.assertUniqueId(id);
     this.assertNodeExists(opts.body, "loop 'body'", id);
+    if (opts.dependsOn) {
+      for (const dep of opts.dependsOn) this.assertNodeExists(dep, "loop 'dependsOn'", id);
+    }
     this.addNode({
       id,
       kind: "loop",
       body: opts.body,
       until: live(opts.until, "until"),
-      ...compact({ maxIterations: opts.maxIterations }),
+      ...compact({
+        maxIterations: opts.maxIterations,
+        dependsOn: opts.dependsOn ? [...opts.dependsOn] : undefined,
+      }),
     });
-    this.state.edges.push({ from: opts.body, to: id, kind: "loop" });
+    // Gate the body on the loop via a `dep` edge (loop → body). This does two
+    // things: (1) stops Phase 2b from scheduling the body as an independent
+    // free node — the body must run ONLY via the loop handler; (2) lets a
+    // failed/skipped loop propagate skip to the body (and transitively to the
+    // gate via worker→gate). We do NOT emit a `loop`-kind edge: it is excluded
+    // from the adjacency maps (non-gating) and, paired with loop→body, would
+    // form a false cycle in detectCycles (which considers all edge kinds).
+    this.state.edges.push({ from: id, to: opts.body, kind: "dep" });
+    // `dependsOn` gates the LOOP itself on upstream nodes (loop edges don't
+    // gate, so a loop sequenced after other nodes must declare them here).
+    if (opts.dependsOn) {
+      for (const dep of opts.dependsOn) this.state.edges.push({ from: dep, to: id, kind: "dep" });
+    }
     return this;
   }
 
@@ -376,6 +403,17 @@ class WorkflowBuilderImpl implements WorkflowBuilder {
       }
     }
     this.addNode({ id, kind: "sequence", steps: [...steps] });
+    // Chain consecutive steps (step[i-1] → step[i]) so the sequence runs IN
+    // ORDER. Without these dep edges every step is ready at once and runs
+    // concurrently — the "ordered" sequence was a no-op. (The step→sequence
+    // edges below still make the sequence node complete only after all steps.)
+    for (let i = 1; i < steps.length; i++) {
+      const prev = steps[i - 1];
+      const curr = steps[i];
+      if (prev !== undefined && curr !== undefined) {
+        this.state.edges.push({ from: prev, to: curr, kind: "dep" });
+      }
+    }
     for (const sid of steps) this.state.edges.push({ from: sid, to: id, kind: "dep" });
     return this;
   }

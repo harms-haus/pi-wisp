@@ -276,8 +276,9 @@ describe("toIR() characterization — edges & conditions", () => {
       .cond("c", { on: "review", when: () => true, then: "pass", else: "fix" })
       .toIR();
     const kinds = ir.edges.map((e) => `${e.from}->${e.to}:${e.kind}`).sort();
-    // dep from review->? edges + fanOut + loop + cond:branch
-    expect(kinds).toEqual(expect.arrayContaining(["review->fan:fanOut", "review->lp:loop"]));
+    // dep/fanOut/cond:branch edges. NOTE: a loop emits a `dep` edge loop→body
+    // (gates the body on the loop + propagates skip), NOT a `loop`-kind edge.
+    expect(kinds).toEqual(expect.arrayContaining(["review->fan:fanOut", "lp->review:dep"]));
     expect(kinds).toContain("c->pass:cond:branch");
     expect(kinds).toContain("c->fix:cond:branch");
     // edges are copies, not the internal live objects (plain objects)
