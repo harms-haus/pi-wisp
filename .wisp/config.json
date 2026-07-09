@@ -1,0 +1,8 @@
+{
+  "limits": {
+    "byProvider": {
+      "zai": 6,
+      "opencode-go": 6
+    }
+  }
+}
