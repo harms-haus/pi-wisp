@@ -42,7 +42,10 @@ for (const n of run.nodes) {
   const evs = byNode.get(n.id) ?? [];
   const hasStart = evs.includes("node.start");
   const terminal = evs.find((t) => t === "node.complete" || t === "node.fail" || t === "node.skip");
-  const ok = hasStart && terminal;
+  // Every node needs a terminal event (complete/fail/skip). Non-skipped nodes
+  // additionally need a node.start (they ran); skipped nodes never ran, so
+  // node.skip alone is correct and sufficient.
+  const ok = Boolean(terminal) && (n.status === "skipped" ? true : hasStart);
   if (!ok) missing.push({ id: n.id, status: n.status, evs });
   console.log(
     `  ${n.id.padEnd(16)} status=${n.status.padEnd(9)} events=[${evs.join(", ")}] ${
