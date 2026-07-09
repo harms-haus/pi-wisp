@@ -14,7 +14,7 @@ import { executeDAG } from "../../engine/executor.js";
 import { expandFanOut } from "../../engine/fanout.js";
 import { createScheduler } from "../../engine/scheduler.js";
 import { createFakeAdapter } from "../helpers/fake-adapter.js";
-import { makeExecutorContext } from "../helpers/executor-context.js";
+import { makeExecutorContext, makeFakeAudit } from "../helpers/executor-context.js";
 import { fn, makeRunState } from "../helpers/fixtures.js";
 import type { AgentAdapter, NodeInvocationContext } from "../../adapters/types.js";
 import type { GraphIR, IRNode, NormalizedEvent } from "../../types.js";
@@ -281,5 +281,80 @@ describe("expandFanOut wires children into downstream consumers", () => {
 
     // Children have no successors (no consumer to wire).
     expect(ctx.successors.get("fan-0")).toBeUndefined();
+  });
+});
+
+// ─── Audit coverage ─────────────────────────────────────────────
+
+describe("audit trail covers every node lifecycle", () => {
+  it("emits run + node start/complete for a fan-out -> reduce run", async () => {
+    const ir = buildIR();
+    const runState = makeRunState(ir);
+    const audit = makeFakeAudit();
+
+    const getAdapter = (_t?: string, nodeId?: string): AgentAdapter => {
+      if (nodeId === "gen") {
+        return createFakeAdapter({
+          events: () => [
+            { type: "session", id: "g" },
+            {
+              type: "done",
+              sessionId: "g",
+              finalText: '{"questions":["q1","q2","q3"]}',
+              durationMs: 1,
+              toolCallCount: 0,
+            },
+          ],
+        });
+      }
+      if (nodeId && nodeId.startsWith("answer-")) {
+        return createFakeAdapter({
+          events: () => [
+            { type: "session", id: nodeId },
+            { type: "done", sessionId: nodeId, finalText: "ans", durationMs: 1, toolCallCount: 0 },
+          ],
+        });
+      }
+      return createFakeAdapter({
+        events: () => [
+          { type: "session", id: "synth" },
+          {
+            type: "done",
+            sessionId: "synth",
+            finalText: '{"primer":"x"}',
+            durationMs: 1,
+            toolCallCount: 0,
+          },
+        ],
+      });
+    };
+
+    await executeDAG({
+      ir,
+      runState,
+      getAdapter,
+      scheduler: createScheduler(),
+      audit,
+      profiles: { inlineProfiles: { default: { agentType: "pi" } } },
+    });
+
+    const startedIds = audit.nodeStart.mock.calls.map((c) => c[0]);
+    const completedIds = audit.nodeComplete.mock.calls.map((c) => c[0]);
+
+    // EVERY node (plain, fanOut parent, reduce, fanOut children) has both a
+    // start and a complete event — nothing is left out of the audit trail.
+    for (const id of ["gen", "answer", "synth", "answer-0", "answer-1", "answer-2"]) {
+      expect(startedIds).toContain(id);
+      expect(completedIds).toContain(id);
+    }
+
+    // The fanOut parent's complete records how many children it expanded into.
+    const fanComplete = audit.nodeComplete.mock.calls.find((c) => c[0] === "answer")!;
+    expect(fanComplete[1].childCount).toBe(3);
+
+    // Plain-node start carries the resolved profile (for debugging which
+    // model/provider ran).
+    const genStart = audit.nodeStart.mock.calls.find((c) => c[0] === "gen")!;
+    expect(genStart[1]).toMatchObject({ profile: "default" });
   });
 });

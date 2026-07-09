@@ -33,6 +33,7 @@ import { createScheduler } from "../../engine/scheduler.js";
 
 // ── Fake adapter ────────────────────────────────────────────────
 import { createFakeAdapter } from "../helpers/fake-adapter.js";
+import { makeFakeAudit } from "../helpers/executor-context.js";
 
 // ── Fixtures ───────────────────────────────────────────────────
 import { makeRunState, fn } from "../helpers/fixtures.js";
@@ -170,6 +171,46 @@ describe("cond branching - RED (expected to fail)", () => {
     // CURRENT FAILURE: else branch also runs → status is "completed", not "skipped"
     expect(runState.nodes.get("reject")?.status).toBe("skipped");
     expect(runState.nodes.get("reject")?.error).toBe("cond-not-taken");
+  });
+
+  it("emits audit node.start/complete for the cond and node.skip for the untaken branch", async () => {
+    const runState = makeRunState(condThenIR);
+    const audit = makeFakeAudit();
+
+    const getAdapter = (_type?: string, nodeId?: string): AgentAdapter => {
+      if (nodeId === "gate")
+        return createFakeAdapter({
+          sessionId: "gate-accepted",
+          finalText: JSON.stringify({ accepted: true }),
+          durationMs: 5,
+        });
+      if (nodeId === "approve")
+        return createFakeAdapter({
+          sessionId: "approve-sess",
+          finalText: "approved!",
+          durationMs: 5,
+        });
+      return createFakeAdapter({ sessionId: "fallback", durationMs: 5 });
+    };
+
+    await withTimeout(
+      executeDAG({
+        ir: condThenIR,
+        runState,
+        getAdapter,
+        scheduler: createScheduler({ maxAgentConcurrency: 4 }),
+        audit,
+      }),
+    );
+
+    const startedIds = audit.nodeStart.mock.calls.map((c) => c[0]);
+    const completedIds = audit.nodeComplete.mock.calls.map((c) => c[0]);
+    // The cond node itself has a start + complete event.
+    expect(startedIds).toContain("decide");
+    expect(completedIds).toContain("decide");
+    // The untaken 'else' branch is recorded as skipped (cond-not-taken).
+    const skipCalls = audit.nodeSkip.mock.calls.map((c) => [c[0], c[1]]);
+    expect(skipCalls).toContainEqual(["reject", "cond-not-taken"]);
   });
 
   it("routes to 'else' when when(ctx) returns falsy — 'then' branch is SKIPPED with cond-not-taken", async () => {

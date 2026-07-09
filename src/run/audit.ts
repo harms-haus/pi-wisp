@@ -93,8 +93,14 @@ export class AuditLogger {
   // ── Node-level events ─────────────────────────────────────────
 
   /** A node has started execution. */
-  nodeStart(nodeId: string): void {
-    this.log({ type: "node.start", nodeId });
+  nodeStart(nodeId: string, meta?: { profile?: string; provider?: string; model?: string }): void {
+    this.log({
+      type: "node.start",
+      nodeId,
+      ...(meta?.profile !== undefined ? { profile: meta.profile } : {}),
+      ...(meta?.provider !== undefined ? { provider: meta.provider } : {}),
+      ...(meta?.model !== undefined ? { model: meta.model } : {}),
+    });
   }
 
   /** A node has made a tool call. */
@@ -110,7 +116,14 @@ export class AuditLogger {
   /** A node has completed successfully. */
   nodeComplete(
     nodeId: string,
-    result: { sessionId?: string; durationMs?: number; toolCount?: number },
+    result: {
+      sessionId?: string;
+      durationMs?: number;
+      toolCount?: number;
+      /** For a fanOut parent: number of children it expanded into. */
+      childCount?: number;
+      costUsd?: number;
+    },
   ): void {
     this.log({
       type: "node.complete",
@@ -118,6 +131,8 @@ export class AuditLogger {
       sessionId: result.sessionId,
       durationMs: result.durationMs,
       toolCount: result.toolCount,
+      ...(result.childCount !== undefined ? { childCount: result.childCount } : {}),
+      ...(result.costUsd !== undefined ? { costUsd: result.costUsd } : {}),
     });
   }
 

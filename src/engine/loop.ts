@@ -17,6 +17,7 @@
 import type { FnDescriptor, GraphIR, IRNode, NodeRuntime, NodeCtx, RunState } from "../types.js";
 import type { AgentAdapter } from "../adapters/types.js";
 import type { Scheduler } from "./scheduler.js";
+import type { AuditLogger } from "../run/audit.js";
 import { formatRunsForResume } from "./transcript.js";
 import type { SessionSnapshot } from "./transcript.js";
 
@@ -54,10 +55,11 @@ export interface LoopDispatch {
   /** Create a NodeCtx for the given node id. */
   createNodeCtx: (runState: RunState, nodeId: string) => NodeCtx;
 
-  /**
-   * Fail a node and propagate skip to its dependents.
-   */
+  /** Fail a node and propagate skip to its dependents. */
   failNode: (nodeId: string, rt: NodeRuntime, message: string) => void;
+
+  /** Optional audit logger for cond/loop lifecycle events. */
+  audit?: AuditLogger;
 
   /** Notify the TUI of a state change (debounced). */
   notify: () => void;
@@ -84,6 +86,7 @@ function skipBranches(
   rt.error = err instanceof Error ? err.message : String(err);
   rt.status = "failed";
   rt.endedAt = Date.now();
+  ctx.audit?.nodeFail(node.id, rt.error);
   const branches: string[] = [];
   if (typeof node.then === "string") branches.push(node.then);
   if (typeof node.else === "string") branches.push(node.else);
@@ -92,6 +95,7 @@ function skipBranches(
     if (branchRt && branchRt.status === "pending") {
       branchRt.status = "skipped";
       branchRt.error = "cond-not-taken";
+      ctx.audit?.nodeSkip(b, "cond-not-taken");
     }
   }
 }
@@ -112,6 +116,7 @@ export function evaluateCond(node: IRNode, ctx: LoopDispatch): string | undefine
 
   rt.status = "running";
   if (rt.startedAt === undefined) rt.startedAt = Date.now();
+  ctx.audit?.nodeStart(node.id);
 
   const nodeCtx = ctx.createNodeCtx(ctx.runState, node.id);
   let branchKey: unknown;
@@ -128,19 +133,26 @@ export function evaluateCond(node: IRNode, ctx: LoopDispatch): string | undefine
   const elseTarget = typeof node.else === "string" ? node.else : undefined;
 
   // Skip the non-chosen branch.
-  const skipTarget = choseThen ? elseTarget : thenTarget;
-  if (skipTarget) {
-    const skipRt = ctx.runState.nodes.get(skipTarget);
-    if (skipRt && skipRt.status === "pending") {
-      skipRt.status = "skipped";
-      skipRt.error = "cond-not-taken";
-    }
-  }
+  skipCondBranch(ctx, choseThen ? elseTarget : thenTarget);
 
   rt.status = "completed";
   rt.endedAt = Date.now();
+  ctx.audit?.nodeComplete(node.id, {
+    durationMs: rt.endedAt - (rt.startedAt ?? rt.endedAt),
+  });
 
   return choseThen ? thenTarget : elseTarget;
+}
+
+/** Skip the non-chosen cond branch (status + audit), if it is still pending. */
+function skipCondBranch(ctx: LoopDispatch, skipTarget: string | undefined): void {
+  if (!skipTarget) return;
+  const skipRt = ctx.runState.nodes.get(skipTarget);
+  if (skipRt && skipRt.status === "pending") {
+    skipRt.status = "skipped";
+    skipRt.error = "cond-not-taken";
+    ctx.audit?.nodeSkip(skipTarget, "cond-not-taken");
+  }
 }
 
 // ─── Loop execution ───────────────────────────────────────────────
@@ -180,6 +192,16 @@ export function collectIterationNodes(bodyId: string, ir: GraphIR): string[] {
  * Called from Phase 2a. The function claims iteration nodes synchronously
  * before any `await` so the main Phase 2b does not schedule them independently.
  */
+/** Synchronously claim every iteration node (ready → running) so the main Phase 2b loop does not schedule them independently. */
+function claimIterationNodes(iterationIds: string[], runState: RunState): void {
+  for (const id of iterationIds) {
+    const rt = runState.nodes.get(id);
+    if (rt && rt.status === "ready") {
+      rt.status = "running";
+    }
+  }
+}
+
 /**
  * Reset all iteration subgraph nodes to `pending` so they can be re-run.
  */
@@ -274,6 +296,7 @@ async function runIterationNodes(
         if (remainingRt && remainingRt.status === "pending") {
           remainingRt.status = "skipped";
           remainingRt.error = "dep-failed";
+          ctx.audit?.nodeSkip(remainingId, "dep-failed");
         }
       }
 
@@ -300,19 +323,23 @@ function checkUntilCondition(loopNode: IRNode & { kind: "loop" }, ctx: LoopDispa
 /**
  * Mark the loop node as completed and record timing.
  */
-function completeLoop(loopRt: NodeRuntime): void {
+function completeLoop(ctx: LoopDispatch, nodeId: string, loopRt: NodeRuntime): void {
   loopRt.status = "completed";
   if (loopRt.startedAt === undefined) loopRt.startedAt = Date.now();
   loopRt.endedAt = Date.now();
+  ctx.audit?.nodeComplete(nodeId, {
+    durationMs: loopRt.endedAt - (loopRt.startedAt ?? loopRt.endedAt),
+  });
 }
 
 /**
  * Mark the loop node as failed.
  */
-function failLoop(loopRt: NodeRuntime, message: string): void {
+function failLoop(ctx: LoopDispatch, nodeId: string, loopRt: NodeRuntime, message: string): void {
   loopRt.error = message;
   loopRt.status = "failed";
   loopRt.endedAt = Date.now();
+  ctx.audit?.nodeFail(nodeId, message);
 }
 
 export async function executeLoop(loopNode: IRNode, ctx: LoopDispatch): Promise<void> {
@@ -322,11 +349,12 @@ export async function executeLoop(loopNode: IRNode, ctx: LoopDispatch): Promise<
 
   loopRt.status = "running";
   if (loopRt.startedAt === undefined) loopRt.startedAt = Date.now();
+  ctx.audit?.nodeStart(loopNode.id);
 
   const bodyId = loopNode.body;
   const bodyNode = ctx.nodeMap.get(bodyId);
   if (!bodyNode) {
-    failLoop(loopRt, `Loop body node "${bodyId}" not found`);
+    failLoop(ctx, loopNode.id, loopRt, `Loop body node "${bodyId}" not found`);
     return;
   }
 
@@ -334,12 +362,7 @@ export async function executeLoop(loopNode: IRNode, ctx: LoopDispatch): Promise<
   const iterationIds = collectIterationNodes(bodyId, ctx.ir);
 
   // Synchronously CLAIM every iteration node so Phase 2b skips them.
-  for (const id of iterationIds) {
-    const rt = ctx.runState.nodes.get(id);
-    if (rt && rt.status === "ready") {
-      rt.status = "running";
-    }
-  }
+  claimIterationNodes(iterationIds, ctx.runState);
 
   const basePrompt = ctx.buildPrompt(bodyNode);
   let iteration = 0;
@@ -360,17 +383,20 @@ export async function executeLoop(loopNode: IRNode, ctx: LoopDispatch): Promise<
 
     // Run each iteration node in dependency order.
     const ok = await runIterationNodes(iterationIds, loopRt, ctx);
-    if (!ok) return;
+    if (!ok) {
+      ctx.audit?.nodeFail(loopNode.id, loopRt.error ?? "loop iteration failed");
+      return;
+    }
 
     // Check the until condition.
     if (checkUntilCondition(loopNode, ctx)) {
-      completeLoop(loopRt);
+      completeLoop(ctx, loopNode.id, loopRt);
       return;
     }
 
     // Not accepted: enforce maxIterations.
     if (iteration >= maxIterations) {
-      completeLoop(loopRt);
+      completeLoop(ctx, loopNode.id, loopRt);
       return;
     }
   }

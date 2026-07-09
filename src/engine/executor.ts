@@ -263,10 +263,15 @@ function scheduleReadyNode(ctx: ExecutorContext, id: string): boolean {
 
   // Lazy fanOut expansion at ready-time.
   if (node.kind === "fanOut") {
-    expandFanOut(ctx, node);
+    ctx.audit?.nodeStart(node.id);
+    const childCount = expandFanOut(ctx, node);
     rt.status = "completed";
     if (rt.startedAt === undefined) rt.startedAt = Date.now();
     rt.endedAt = Date.now();
+    ctx.audit?.nodeComplete(node.id, {
+      durationMs: rt.endedAt - rt.startedAt,
+      childCount,
+    });
     return true;
   }
 
@@ -277,9 +282,11 @@ function scheduleReadyNode(ctx: ExecutorContext, id: string): boolean {
   // Other structural kinds (parallel/sequence) complete as placeholders so
   // their dependents unblock.
   if (node.kind !== "node") {
+    ctx.audit?.nodeStart(node.id);
     rt.status = "completed";
     if (rt.startedAt === undefined) rt.startedAt = Date.now();
     rt.endedAt = Date.now();
+    ctx.audit?.nodeComplete(node.id, { durationMs: rt.endedAt - rt.startedAt });
     return true;
   }
 
@@ -344,7 +351,6 @@ async function runNodeWrapper(ctx: ExecutorContext, node: IRNode): Promise<void>
   const rt = ctx.runState.nodes.get(node.id);
   if (rt) rt.status = "running";
   if (rt && rt.startedAt === undefined) rt.startedAt = Date.now();
-  ctx.audit?.nodeStart(node.id);
   return runNode(ctx, node, schedulable);
 }
 
@@ -444,6 +450,7 @@ export async function executeDAG(options: ExecuteDAGOptions): Promise<RunSummary
     failNode: (nodeId, rt, message) => {
       failNode(ctx, nodeId, rt, message);
     },
+    audit: ctx.audit,
     notify,
   };
 

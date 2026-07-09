@@ -46,6 +46,7 @@ export async function executeReduceNode(ctx: ExecutorContext, node: IRNode): Pro
   const rt = ctx.runState.nodes.get(node.id);
   if (!rt) return;
 
+  ctx.audit?.nodeStart(node.id);
   const nodeCtx = createNodeCtx(ctx.runState, node.id);
 
   // Resolve the adapter (agent-run synthesis) when a profile is present.
@@ -95,7 +96,7 @@ function runMergeFn(
     failNode(ctx, node.id, rt, err instanceof Error ? err.message : String(err));
     return;
   }
-  completeReduce(rt, merged);
+  completeReduce(ctx, node, rt, merged);
   ctx.notify();
 }
 
@@ -131,7 +132,7 @@ async function runSynthesis(
     failNode(ctx, node.id, rt, result.error.message);
     return;
   }
-  completeReduce(rt, result.output);
+  completeReduce(ctx, node, rt, result.output);
   ctx.notify();
 }
 
@@ -142,10 +143,18 @@ function readInstructionPrompt(node: ReduceIRNode): string | undefined {
   return typeof prompt === "string" ? prompt : undefined;
 }
 
-/** Set a reduce node's output and mark it completed. */
-function completeReduce(rt: NodeRuntime, output: unknown): void {
+/** Set a reduce node's output, mark it completed, and emit the audit event. */
+function completeReduce(
+  ctx: ExecutorContext,
+  node: ReduceIRNode,
+  rt: NodeRuntime,
+  output: unknown,
+): void {
   rt.finalText = typeof output === "string" ? output : JSON.stringify(output, null, 2);
   rt.parsedOutput = output;
   rt.status = "completed";
   rt.endedAt = Date.now();
+  ctx.audit?.nodeComplete(node.id, {
+    durationMs: rt.startedAt !== undefined ? rt.endedAt - rt.startedAt : undefined,
+  });
 }

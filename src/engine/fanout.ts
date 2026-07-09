@@ -75,10 +75,10 @@ function buildFanOutChild(
  * `nodeMap`. Never throws — iterate/each fn failures are treated as producing
  * zero / skipped children.
  */
-export function expandFanOut(ctx: ExecutorContext, node: IRNode): void {
-  if (node.kind !== "fanOut") return;
+export function expandFanOut(ctx: ExecutorContext, node: IRNode): number {
+  if (node.kind !== "fanOut") return 0;
   const producerRt = ctx.runState.nodes.get(node.from);
-  if (!producerRt || producerRt.status !== "completed") return;
+  if (!producerRt || producerRt.status !== "completed") return 0;
 
   const nodeCtx = createNodeCtx(ctx.runState, node.id);
   let items: unknown[];
@@ -125,6 +125,8 @@ export function expandFanOut(ctx: ExecutorContext, node: IRNode): void {
       }
     }
   }
+
+  return createdChildIds.length;
 }
 
 /** Idempotently record a directed adjacency (`from` → `to`) in a map. */

@@ -256,6 +256,7 @@ function completeNode(ctx: ExecutorContext, node: IRNode, rt: NodeRuntime): void
     sessionId: rt.sessionId,
     durationMs: rt.endedAt - (rt.startedAt ?? rt.endedAt),
     toolCount: rt.toolCount,
+    ...(rt.costUsd !== undefined ? { costUsd: rt.costUsd } : {}),
   });
   ctx.notify();
 }
@@ -351,6 +352,11 @@ export async function runNode(
 ): Promise<void> {
   const rt = ctx.runState.nodes.get(node.id);
   if (!rt) return;
+
+  // Emit node.start once (not per retry) with the resolved profile so the
+  // audit record shows what model/provider ran. Retries get node.retry events.
+  emitNodeStart(ctx, node);
+
   let slot = slotHandle(ctx.scheduler, schedulable);
 
   try {
@@ -426,6 +432,19 @@ export async function runNode(
   } finally {
     slot.release();
   }
+}
+
+/** Emit node.start with the resolved profile/provider/model (best-effort). */
+function emitNodeStart(ctx: ExecutorContext, node: IRNode): void {
+  const profileRef = node.kind === "node" ? node.profileRef : undefined;
+  const resolved = profileRef
+    ? resolveProfileSync(profileRef, ctx.options.profiles ?? {})
+    : undefined;
+  ctx.audit?.nodeStart(node.id, {
+    profile: profileRef,
+    provider: resolved?.profile.provider,
+    model: resolved?.profile.model,
+  });
 }
 
 /**
