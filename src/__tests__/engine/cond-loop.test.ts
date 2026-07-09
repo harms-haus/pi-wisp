@@ -213,6 +213,112 @@ describe("cond branching - RED (expected to fail)", () => {
     expect(skipCalls).toContainEqual(["reject", "cond-not-taken"]);
   });
 
+  // ── Inline NodeSpec branches (the common DSL form) ───────────────
+  // Regression: inline then/else branches were stored on the cond node but
+  // never materialized into graph nodes, so the chosen branch silently never
+  // ran. Now they are expanded into dynamic `<condId>:then` / `<condId>:else`
+  // nodes (mirroring fanOut child expansion).
+  const condInlineIR: GraphIR = {
+    title: "cond-inline",
+    slug: "cond-inline",
+    options: { defaultRetries: 0 },
+    nodes: [
+      {
+        id: "gate",
+        kind: "node",
+        profileRef: "default",
+        prompt: "Review",
+        outputSchema: GATE_SCHEMA,
+      },
+      {
+        id: "decide",
+        kind: "cond",
+        on: "gate",
+        whenFnRef: fn('(ctx) => Boolean(ctx.output("gate").accepted)', "cond"),
+        then: { prompt: "Escalate to oncall", profileRef: "default" },
+        else: { prompt: "Handle normally", profileRef: "default" },
+      },
+    ],
+    // NO cond:branch edges and NO approve/reject nodes — branches are inline.
+    edges: [{ from: "gate", to: "decide", kind: "dep" }],
+    conditions: [],
+    schemas: {},
+    primitives: {},
+  };
+
+  it("materializes an inline then-branch and runs it (else is skipped)", async () => {
+    const runState = makeRunState(condInlineIR);
+    const getAdapter = (_type?: string, nodeId?: string): AgentAdapter => {
+      if (nodeId === "gate")
+        return createFakeAdapter({
+          sessionId: "g",
+          finalText: JSON.stringify({ accepted: true }),
+          durationMs: 5,
+        });
+      if (nodeId === "decide:then")
+        return createFakeAdapter({ sessionId: "t", finalText: "escalated!", durationMs: 5 });
+      return createFakeAdapter({
+        sessionId: "fallback",
+        finalText: "should-not-run",
+        durationMs: 5,
+      });
+    };
+
+    await withTimeout(
+      executeDAG({
+        ir: condInlineIR,
+        runState,
+        getAdapter,
+        scheduler: createScheduler({ maxAgentConcurrency: 4 }),
+      }),
+    );
+
+    expect(runState.nodes.get("gate")?.status).toBe("completed");
+    expect(runState.nodes.get("decide")?.status).toBe("completed");
+    // The chosen then-branch was materialized and RAN.
+    const thenRt = runState.nodes.get("decide:then");
+    expect(thenRt?.status).toBe("completed");
+    expect(thenRt?.finalText).toBe("escalated!");
+    // The untaken else-branch was materialized and SKIPPED.
+    const elseRt = runState.nodes.get("decide:else");
+    expect(elseRt?.status).toBe("skipped");
+    expect(elseRt?.error).toBe("cond-not-taken");
+  });
+
+  it("materializes an inline else-branch and runs it (then is skipped)", async () => {
+    const runState = makeRunState(condInlineIR);
+    const getAdapter = (_type?: string, nodeId?: string): AgentAdapter => {
+      if (nodeId === "gate")
+        return createFakeAdapter({
+          sessionId: "g",
+          finalText: JSON.stringify({ accepted: false }),
+          durationMs: 5,
+        });
+      if (nodeId === "decide:else")
+        return createFakeAdapter({ sessionId: "e", finalText: "handled!", durationMs: 5 });
+      return createFakeAdapter({
+        sessionId: "fallback",
+        finalText: "should-not-run",
+        durationMs: 5,
+      });
+    };
+
+    await withTimeout(
+      executeDAG({
+        ir: condInlineIR,
+        runState,
+        getAdapter,
+        scheduler: createScheduler({ maxAgentConcurrency: 4 }),
+      }),
+    );
+
+    const elseRt = runState.nodes.get("decide:else");
+    expect(elseRt?.status).toBe("completed");
+    expect(elseRt?.finalText).toBe("handled!");
+    expect(runState.nodes.get("decide:then")?.status).toBe("skipped");
+    expect(runState.nodes.get("decide:then")?.error).toBe("cond-not-taken");
+  });
+
   it("routes to 'else' when when(ctx) returns falsy — 'then' branch is SKIPPED with cond-not-taken", async () => {
     const runState = makeRunState(condThenIR);
 

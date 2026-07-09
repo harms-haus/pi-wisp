@@ -14,7 +14,15 @@
 //   subsequent iterations, and respects maxIterations.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import type { FnDescriptor, GraphIR, IRNode, NodeRuntime, NodeCtx, RunState } from "../types.js";
+import type {
+  FnDescriptor,
+  GraphIR,
+  IRNode,
+  NodeRuntime,
+  NodeCtx,
+  NodeSpec,
+  RunState,
+} from "../types.js";
 import type { AgentAdapter } from "../adapters/types.js";
 import type { Scheduler } from "./scheduler.js";
 import type { AuditLogger } from "../run/audit.js";
@@ -74,6 +82,64 @@ export interface LoopDispatch {
 // ─── Cond evaluation ──────────────────────────────────────────────
 
 /**
+ * Materialize an inline cond branch (a {@link NodeSpec}) into a dynamic graph
+ * node named `<condId>:then` / `<condId>:else`, mirroring fanOut child
+ * expansion. Registers it in `nodeMap` + `runState` (status `pending`).
+ *
+ * The branch is a free node (no predecessors): the cond has already completed
+ * by the time this runs, so `depsMet` is satisfied and the main loop schedules
+ * the taken branch on its next pass. The caller skips the non-chosen branch.
+ */
+function materializeCondBranch(
+  ctx: LoopDispatch,
+  node: IRNode & { kind: "cond" },
+  side: "then" | "else",
+  spec: NodeSpec,
+): string {
+  const branchId = `${node.id}:${side}`;
+  const branchNode: IRNode = {
+    id: branchId,
+    kind: "node",
+    agentType: spec.agentType,
+    profileRef: spec.profileRef ?? "default",
+    prompt: spec.prompt,
+    outputSchema: spec.outputSchema,
+    dependsOn: spec.dependsOn,
+    stage: spec.stage,
+    retries: spec.retries,
+    timeoutSec: spec.timeoutSec,
+    cwd: spec.cwd,
+    primitive: { kind: "cond-branch", meta: { parent: node.id, side } },
+  };
+  ctx.nodeMap.set(branchId, branchNode);
+  if (!ctx.runState.nodes.has(branchId)) {
+    ctx.runState.nodes.set(branchId, {
+      status: "pending",
+      attempts: 0,
+      toolCount: 0,
+      filesEdited: [],
+    });
+  }
+  return branchId;
+}
+
+/**
+ * Resolve a cond branch to a node id. A string branch is an existing graph
+ * node; an inline {@link NodeSpec} is materialized into a dynamic node. An
+ * absent branch (`else === undefined`) yields `undefined`.
+ */
+function resolveBranchTarget(
+  ctx: LoopDispatch,
+  node: IRNode & { kind: "cond" },
+  side: "then" | "else",
+): string | undefined {
+  const spec = node[side];
+  if (spec === undefined) return undefined;
+  if (typeof spec === "string") return spec;
+  return materializeCondBranch(ctx, node, side, spec);
+}
+
+/**
  * Skip all branches of a cond node after the whenFn threw.
  * Marks the cond node as failed and both then/else as skipped.
  */
@@ -87,16 +153,9 @@ function skipBranches(
   rt.status = "failed";
   rt.endedAt = Date.now();
   ctx.audit?.nodeFail(node.id, rt.error);
-  const branches: string[] = [];
-  if (typeof node.then === "string") branches.push(node.then);
-  if (typeof node.else === "string") branches.push(node.else);
-  for (const b of branches) {
-    const branchRt = ctx.runState.nodes.get(b);
-    if (branchRt && branchRt.status === "pending") {
-      branchRt.status = "skipped";
-      branchRt.error = "cond-not-taken";
-      ctx.audit?.nodeSkip(b, "cond-not-taken");
-    }
+  // Materialize inline branches so they still appear (skipped) in the run.
+  for (const side of ["then", "else"] as const) {
+    skipCondBranch(ctx, resolveBranchTarget(ctx, node, side));
   }
 }
 
@@ -129,10 +188,12 @@ export function evaluateCond(node: IRNode, ctx: LoopDispatch): string | undefine
   }
 
   const choseThen = Boolean(branchKey);
-  const thenTarget = typeof node.then === "string" ? node.then : undefined;
-  const elseTarget = typeof node.else === "string" ? node.else : undefined;
+  // String branches are existing graph nodes; inline NodeSpecs are materialized
+  // into dynamic nodes (`<condId>:then` / `<condId>:else`).
+  const thenTarget = resolveBranchTarget(ctx, node, "then");
+  const elseTarget = resolveBranchTarget(ctx, node, "else");
 
-  // Skip the non-chosen branch.
+  // Skip the non-chosen branch (both branches now exist as nodes).
   skipCondBranch(ctx, choseThen ? elseTarget : thenTarget);
 
   rt.status = "completed";
